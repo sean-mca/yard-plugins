@@ -7,7 +7,9 @@ use anyhow::{Result, anyhow};
 
 use crate::codegen::types::Sink;
 
-use super::helpers::{derive_jdbc_url, quoted_list, render_jdbc_auth, render_secret_fetch};
+use super::helpers::{
+    derive_jdbc_url, python_str_literal, quoted_list, render_jdbc_auth, render_secret_fetch,
+};
 
 /// Return `value` if present, or an error naming the missing `field` on
 /// the sink.
@@ -63,13 +65,17 @@ pub(super) fn render_sink(
         "s3" => {
             let format = sink.format.as_deref().unwrap_or("parquet");
             let path = require_sink_str(sink.path.as_deref(), "s3", "path")?;
-            let mut write = format!("    {var}.write.format(\"{format}\").mode(\"{mode}\")");
+            let mut write = format!(
+                "    {var}.write.format({}).mode({})",
+                python_str_literal(format),
+                python_str_literal(mode),
+            );
             if !sink.partition_by.is_empty() {
                 // write to String is infallible
                 let _ = write!(write, ".partitionBy({})", quoted_list(&sink.partition_by));
             }
             // write to String is infallible
-            let _ = write!(write, ".save(\"{path}\")");
+            let _ = write!(write, ".save({})", python_str_literal(path));
             lines.push(write);
         }
         "jdbc" => {
@@ -96,14 +102,16 @@ pub(super) fn render_sink(
                 }
             };
             lines.push(format!(
-                "    {var}.write.format(\"jdbc\").option(\"url\", \"{url}\").option(\"dbtable\", \"{table}\")\\"
+                "    {var}.write.format(\"jdbc\").option(\"url\", {}).option(\"dbtable\", {})\\",
+                python_str_literal(url),
+                python_str_literal(table),
             ));
             if let Some((user_expr, password_expr, _)) = &auth {
                 lines.push(format!(
                     "        .option(\"user\", {user_expr}).option(\"password\", {password_expr})\\"
                 ));
             }
-            lines.push(format!("        .mode(\"{mode}\").save()"));
+            lines.push(format!("        .mode({}).save()", python_str_literal(mode)));
         }
         "catalog" => {
             let db = require_sink_str(sink.database.as_deref(), "catalog", "database")?;
@@ -112,7 +120,9 @@ pub(super) fn render_sink(
                 "    sink_frame = DynamicFrame.fromDF({var}, glueContext, \"sink_frame\")"
             ));
             lines.push(format!(
-                "    glueContext.write_dynamic_frame.from_catalog(frame=sink_frame, database=\"{db}\", table_name=\"{table}\")"
+                "    glueContext.write_dynamic_frame.from_catalog(frame=sink_frame, database={}, table_name={})",
+                python_str_literal(db),
+                python_str_literal(table),
             ));
         }
         "iceberg" => {
@@ -137,27 +147,38 @@ pub(super) fn render_sink(
                     sink.path
                         .as_deref()
                         .filter(|p| !p.is_empty())
-                        .map(|p| format!("\n            .tableProperty(\"location\", \"{p}\")")),
+                        .map(|p| {
+                            format!(
+                                "\n            .tableProperty(\"location\", {})",
+                                python_str_literal(p)
+                            )
+                        }),
                 )
                 .collect::<String>();
+            let escaped_db = python_str_literal(db);
             if let Some(cid) = catalog_id {
+                let escaped_cid = python_str_literal(cid);
                 lines.push(format!(
                     "    _glue = boto3.client(\"glue\")\n    \
                      try:\n        \
-                         _glue.get_database(CatalogId=\"{cid}\", Name=\"{db}\")\n    \
+                         _glue.get_database(CatalogId={escaped_cid}, Name={escaped_db})\n    \
                      except _glue.exceptions.EntityNotFoundException:\n        \
-                         _glue.create_database(CatalogId=\"{cid}\", DatabaseInput={{\"Name\": \"{db}\"}})"
+                         _glue.create_database(CatalogId={escaped_cid}, DatabaseInput={{\"Name\": {escaped_db}}})"
                 ));
             } else {
                 lines.push(format!(
                     "    _glue = boto3.client(\"glue\")\n    \
                      try:\n        \
-                         _glue.get_database(Name=\"{db}\")\n    \
+                         _glue.get_database(Name={escaped_db})\n    \
                      except _glue.exceptions.EntityNotFoundException:\n        \
-                         _glue.create_database(DatabaseInput={{\"Name\": \"{db}\"}})"
+                         _glue.create_database(DatabaseInput={{\"Name\": {escaped_db}}})"
                 ));
             }
-            lines.push(format!("    _tbl = \"glue_catalog.{db}.{table}\""));
+            // Build qualified table name: glue_catalog.<db>.<table>
+            // db and table are validated identifiers so simple concat is safe
+            // for the Python string literal
+            let tbl_literal = format!("glue_catalog.{db}.{table}");
+            lines.push(format!("    _tbl = {}", python_str_literal(&tbl_literal)));
             let new_table_coerce = if fill_nulls {
                 format!(
                     "_target = _yard_void_free_schema({var}.schema)\n        \

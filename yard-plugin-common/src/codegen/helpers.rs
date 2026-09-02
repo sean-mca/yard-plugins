@@ -38,6 +38,30 @@ pub(super) fn render_imports(imports: &[Import]) -> String {
     rendered.join("\n")
 }
 
+// --- Python string escaping ---
+
+/// Escape a string and wrap it in double quotes for embedding inside
+/// generated Python source. Handles backslashes, quotes, and control
+/// characters (`\n`, `\r`, `\t`) so the result is always a valid
+/// single-line Python string literal.
+#[must_use]
+pub(super) fn python_str_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 // --- Source rendering helpers ---
 
 /// Render a [`serde_json::Value`] as a Python literal.
@@ -51,9 +75,7 @@ pub(super) fn python_literal(v: &serde_json::Value) -> String {
         serde_json::Value::Null => "None".to_string(),
         serde_json::Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-        }
+        serde_json::Value::String(s) => python_str_literal(s),
         serde_json::Value::Array(arr) => {
             let items: Vec<String> = arr.iter().map(python_literal).collect();
             format!("[{}]", items.join(", "))
@@ -63,7 +85,7 @@ pub(super) fn python_literal(v: &serde_json::Value) -> String {
             keys.sort();
             let items: Vec<String> = keys
                 .iter()
-                .map(|k| format!("\"{}\": {}", k, python_literal(&obj[*k])))
+                .map(|k| format!("{}: {}", python_str_literal(k), python_literal(&obj[*k])))
                 .collect();
             format!("{{{}}}", items.join(", "))
         }
@@ -125,11 +147,11 @@ pub(super) fn append_spark_options(
 ) {
     for (k, v) in seed {
         // write to String is infallible
-        let _ = write!(chain, ".option(\"{k}\", \"{v}\")");
+        let _ = write!(chain, ".option({}, {})", python_str_literal(k), python_str_literal(v));
     }
     for (k, v) in extra {
         // write to String is infallible
-        let _ = write!(chain, ".option(\"{}\", {})", k, python_literal(v));
+        let _ = write!(chain, ".option({}, {})", python_str_literal(k), python_literal(v));
     }
 }
 
@@ -141,7 +163,7 @@ pub(super) fn append_spark_options(
 #[must_use]
 pub(super) fn quoted_list(cols: &[String]) -> String {
     cols.iter()
-        .map(|c| format!("\"{c}\""))
+        .map(|c| python_str_literal(c))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -153,11 +175,10 @@ pub(super) fn quoted_list(cols: &[String]) -> String {
 #[must_use]
 pub(super) fn render_secret_fetch(secret_id: &str, prefix: &str) -> String {
     let var = format!("{prefix}_secret");
+    let escaped_id = python_str_literal(secret_id);
     [
         format!("    {var}_client = boto3.client(\"secretsmanager\")"),
-        format!(
-            "    {var}_resp = {var}_client.get_secret_value(SecretId=\"{secret_id}\")"
-        ),
+        format!("    {var}_resp = {var}_client.get_secret_value(SecretId={escaped_id})"),
         format!("    {var} = json.loads({var}_resp[\"SecretString\"])"),
     ]
     .join("\n")
@@ -231,7 +252,7 @@ pub(super) fn render_jdbc_auth(
                 format!("{secret_var}[\"username\"]")
             } else {
                 let u = rds.username.as_deref().unwrap_or("");
-                format!("\"{u}\"")
+                python_str_literal(u)
             };
             let token_var = format!("{prefix}_token");
             let pre = render_rds_iam_token_fetch(prefix, rds, &user_expr);
@@ -248,13 +269,15 @@ fn render_rds_iam_token_fetch(prefix: &str, rds: &RdsIamAuth, user_expr: &str) -
     } = rds;
     let client_var = format!("_{prefix}_rds");
     let token_var = format!("{prefix}_token");
+    let escaped_region = python_str_literal(region);
+    let escaped_host = python_str_literal(host);
     vec![
-        format!("    {client_var} = boto3.client(\"rds\", region_name=\"{region}\")"),
+        format!("    {client_var} = boto3.client(\"rds\", region_name={escaped_region})"),
         format!("    {token_var} = {client_var}.generate_db_auth_token("),
-        format!("        DBHostname=\"{host}\","),
+        format!("        DBHostname={escaped_host},"),
         format!("        Port={port},"),
         format!("        DBUsername={user_expr},"),
-        format!("        Region=\"{region}\","),
+        format!("        Region={escaped_region},"),
         "    )".to_string(),
     ]
 }
@@ -301,7 +324,7 @@ pub(super) fn render_partition_derivation(config: &JobConfig, sink_source: &str)
             .partition_timestamp_column
             .as_deref()
             .unwrap_or("event_time");
-        lines.push(format!("    _ts = \"{col}\""));
+        lines.push(format!("    _ts = {}", python_str_literal(col)));
     }
     for unit in &config.partition_by {
         let func = match unit.as_str() {
@@ -310,9 +333,10 @@ pub(super) fn render_partition_derivation(config: &JobConfig, sink_source: &str)
             "day" => "dayofmonth",
             _ => continue,
         };
+        let escaped_unit = python_str_literal(unit);
         lines.push(format!(
-            "    if \"{unit}\" not in {var}.columns:\n        \
-             {var} = {var}.withColumn(\"{unit}\", F.{func}(F.col(_ts)))"
+            "    if {escaped_unit} not in {var}.columns:\n        \
+             {var} = {var}.withColumn({escaped_unit}, F.{func}(F.col(_ts)))"
         ));
     }
     Some(lines.join("\n"))

@@ -9,7 +9,7 @@ use crate::codegen::types::Source;
 
 use super::helpers::{
     append_spark_options, build_options_dict, derive_jdbc_url, effective_engine, python_literal,
-    render_jdbc_auth, render_secret_fetch, require_str,
+    python_str_literal, render_jdbc_auth, render_secret_fetch, require_str,
 };
 
 /// Render a `glueContext.create_dynamic_frame.from_options(...).toDF()`
@@ -22,14 +22,17 @@ pub(super) fn glue_from_options(
     ctx: &str,
     format: Option<&str>,
 ) -> String {
+    use super::helpers::python_str_literal;
     let format_arg = format
-        .map(|f| format!("format=\"{f}\", "))
+        .map(|f| std::format!("format={}, ", python_str_literal(f)))
         .unwrap_or_default();
-    format!(
+    std::format!(
         "    {var} = glueContext.create_dynamic_frame.from_options(\
-         connection_type=\"{connection_type}\", \
+         connection_type={}, \
          {format_arg}connection_options={options_expr}, \
-         transformation_ctx=\"{ctx}\").toDF()"
+         transformation_ctx={}).toDF()",
+        python_str_literal(connection_type),
+        python_str_literal(ctx),
     )
 }
 
@@ -71,7 +74,7 @@ pub(super) fn render_source(source: &Source, default_engine: &str) -> Result<Str
                 let mut chain = format!("spark.read.format(\"{format}\")");
                 append_spark_options(&mut chain, &[], &source.options);
                 // write to String is infallible
-                let _ = write!(chain, ".load(\"{path}\")");
+                let _ = write!(chain, ".load({})", python_str_literal(path));
                 lines.push(format!("    {var} = {chain}"));
             }
         }
@@ -152,7 +155,10 @@ pub(super) fn render_source(source: &Source, default_engine: &str) -> Result<Str
             let db = require_str(source.database.as_deref(), name, "database")?;
             let table = require_str(source.table.as_deref(), name, "table")?;
             lines.push(format!(
-                "    {var} = glueContext.create_dynamic_frame.from_catalog(database=\"{db}\", table_name=\"{table}\", transformation_ctx=\"{ctx}\").toDF()"
+                "    {var} = glueContext.create_dynamic_frame.from_catalog(database={}, table_name={}, transformation_ctx={}).toDF()",
+                python_str_literal(db),
+                python_str_literal(table),
+                python_str_literal(&ctx),
             ));
         }
         "kafka" => {
@@ -178,7 +184,8 @@ pub(super) fn render_source(source: &Source, default_engine: &str) -> Result<Str
             let headers_lit = python_literal(&serde_json::Value::Object(headers_obj));
             let resp_var = format!("_resp_{name}");
             lines.push(format!(
-                "    {resp_var} = requests.get(\"{url}\", headers={headers_lit})"
+                "    {resp_var} = requests.get({}, headers={headers_lit})",
+                python_str_literal(url),
             ));
             lines.push(format!("    {resp_var}.raise_for_status()"));
             lines.push(format!(

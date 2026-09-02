@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 
 use crate::codegen::types::Transform;
 
-use super::helpers::quoted_list;
+use super::helpers::{python_str_literal, quoted_list};
 
 /// Resolve the input and output dataframe variable names for a transform.
 ///
@@ -53,10 +53,14 @@ pub(super) fn render_transform(
             // Register all named sources as temp views
             for name in all_source_names {
                 lines.push(format!(
-                    "    df_{name}.createOrReplaceTempView(\"{name}\")"
+                    "    df_{name}.createOrReplaceTempView({})",
+                    python_str_literal(name),
                 ));
             }
-            lines.push(format!("    {output_var} = spark.sql(\"{query}\")"));
+            lines.push(format!(
+                "    {output_var} = spark.sql({})",
+                python_str_literal(query),
+            ));
             Ok(lines.join("\n"))
         }
         "join" => {
@@ -73,7 +77,9 @@ pub(super) fn render_transform(
             let output_name = transform.output.as_deref().unwrap_or(left);
             let output_var = format!("df_{output_name}");
             Ok(format!(
-                "    {output_var} = df_{left}.join(df_{right}, on=\"{on_col}\", how=\"{how}\")"
+                "    {output_var} = df_{left}.join(df_{right}, on={}, how={})",
+                python_str_literal(on_col),
+                python_str_literal(how),
             ))
         }
         "drop_columns" => {
@@ -97,14 +103,16 @@ pub(super) fn render_transform(
             let mut lines: Vec<String> = Vec::with_capacity(entries.len());
             let mut first = true;
             for (old, new) in &entries {
+                let escaped_old = python_str_literal(old);
+                let escaped_new = python_str_literal(new);
                 if first {
                     lines.push(format!(
-                        "    {output} = {input}.withColumnRenamed(\"{old}\", \"{new}\")"
+                        "    {output} = {input}.withColumnRenamed({escaped_old}, {escaped_new})"
                     ));
                     first = false;
                 } else {
                     lines.push(format!(
-                        "    {output} = {output}.withColumnRenamed(\"{old}\", \"{new}\")"
+                        "    {output} = {output}.withColumnRenamed({escaped_old}, {escaped_new})"
                     ));
                 }
             }
@@ -123,7 +131,8 @@ pub(super) fn render_transform(
                 .unwrap_or("lit(None)")
                 .trim();
             Ok(format!(
-                "    {output} = {input}.withColumn(\"{name}\", {expr})"
+                "    {output} = {input}.withColumn({}, {expr})",
+                python_str_literal(name),
             ))
         }
         "aggregate" => {
@@ -133,7 +142,13 @@ pub(super) fn render_transform(
             agg_entries.sort_by(|a, b| a.0.cmp(b.0));
             let agg_exprs = agg_entries
                 .iter()
-                .map(|(alias, expr)| format!("F.expr(\"{}\").alias(\"{}\")", expr.trim(), alias))
+                .map(|(alias, expr)| {
+                    format!(
+                        "F.expr({}).alias({})",
+                        python_str_literal(expr.trim()),
+                        python_str_literal(alias),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             Ok(format!(
@@ -164,7 +179,7 @@ pub(super) fn render_transform(
                     .iter()
                     .map(|o| {
                         let dir = if o.desc { "desc" } else { "asc" };
-                        format!("F.col(\"{}\").{dir}()", o.column)
+                        format!("F.col({}).{dir}()", python_str_literal(&o.column))
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -173,7 +188,9 @@ pub(super) fn render_transform(
             }
             let line1 = format!("    {window_var} = {spec}");
             let line2 = format!(
-                "    {output} = {input}.withColumn(\"{col_name}\", F.expr(\"{expr}\").over({window_var}))"
+                "    {output} = {input}.withColumn({}, F.expr({}).over({window_var}))",
+                python_str_literal(col_name),
+                python_str_literal(expr),
             );
             Ok(format!("{line1}\n{line2}"))
         }
