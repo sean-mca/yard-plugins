@@ -40,6 +40,7 @@ To view this code: `cd ../yard && git show 1cfa880^:yard-core/src/providers/glue
 
 ## Rules
 
+- **All Rust code MUST adhere to every rule in `../yard/rules/`.** This applies to all agents and sub-agents — no exceptions.
 - Never modify `Cargo.toml` without asking first
 - Never bump versions unless explicitly asked
 - `unwrap()` is fine in tests, never in production code
