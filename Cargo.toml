@@ -6,7 +6,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-yard-plugin-sdk = { git = "https://github.com/sean-mca/yard.git", branch = "main" }
+yard-plugin-sdk = { path = "../yard/yard-plugin-sdk" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
