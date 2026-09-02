@@ -5,4 +5,7 @@
 //! and sink rendering. Sub-modules handle distinct rendering concerns.
 
 pub(crate) mod helpers;
+mod sink;
+mod source;
+mod transform;
 pub(crate) mod types;
