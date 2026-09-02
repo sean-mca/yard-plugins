@@ -76,7 +76,7 @@ pub struct Import {
 }
 
 /// JDBC authentication configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct JdbcAuth {
     /// RDS IAM authentication configuration.
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct JdbcAuth {
 }
 
 /// RDS IAM authentication parameters.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RdsIamAuth {
     /// DB username. Optional when `secret_id` is also set.
     #[serde(default)]
@@ -168,7 +168,7 @@ pub struct Source {
 }
 
 /// A data sink definition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Sink {
     /// Source dataframe name to write from.
     #[serde(default)]

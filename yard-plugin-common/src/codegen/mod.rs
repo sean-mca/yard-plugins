@@ -317,49 +317,14 @@ pub fn generate_pyspark(job_name: &str, job_config: &serde_json::Value) -> Resul
             }
             // Mirror job-level partition_by onto the iceberg sink so writeTo
             // emits `.partitionedBy(...)` on first table creation.
-            let effective_sink = if sink.sink_type == "iceberg" && !config.partition_by.is_empty() {
-                let mut partition_by = config.partition_by.clone();
-                // Merge: keep sink's existing partition_by and append job-level ones
-                if !sink.partition_by.is_empty() {
-                    partition_by = sink.partition_by.clone();
-                }
-                crate::codegen::types::Sink {
-                    source: sink.source.clone(),
-                    sink_type: sink.sink_type.clone(),
-                    format: sink.format.clone(),
-                    path: sink.path.clone(),
-                    connection_url: sink.connection_url.clone(),
-                    table: sink.table.clone(),
-                    database: sink.database.clone(),
-                    secret_id: sink.secret_id.clone(),
-                    mode: sink.mode.clone(),
-                    partition_by,
-                    connection_type: sink.connection_type.clone(),
-                    fill_nulls: sink.fill_nulls,
-                    auth: None,
-                    options: sink.options.clone(),
-                    catalog_id: sink.catalog_id.clone(),
-                }
-            } else {
-                // Create a reference-compatible owned copy
-                crate::codegen::types::Sink {
-                    source: sink.source.clone(),
-                    sink_type: sink.sink_type.clone(),
-                    format: sink.format.clone(),
-                    path: sink.path.clone(),
-                    connection_url: sink.connection_url.clone(),
-                    table: sink.table.clone(),
-                    database: sink.database.clone(),
-                    secret_id: sink.secret_id.clone(),
-                    mode: sink.mode.clone(),
-                    partition_by: sink.partition_by.clone(),
-                    connection_type: sink.connection_type.clone(),
-                    fill_nulls: sink.fill_nulls,
-                    auth: None,
-                    options: sink.options.clone(),
-                    catalog_id: sink.catalog_id.clone(),
-                }
-            };
+            let mut effective_sink = sink.clone();
+            if effective_sink.sink_type == "iceberg"
+                && !config.partition_by.is_empty()
+                && sink.partition_by.is_empty()
+            {
+                effective_sink.partition_by = config.partition_by.clone();
+            }
+            let effective_sink = effective_sink;
             let catalog_id = config
                 .config
                 .get("glue")
