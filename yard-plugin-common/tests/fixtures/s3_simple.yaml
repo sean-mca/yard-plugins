@@ -1,0 +1,11 @@
+job_type: glue
+sources:
+  - name: events
+    source_type: s3
+    format: parquet
+    path: s3://my-bucket/events/
+sink:
+  sink_type: s3
+  format: parquet
+  path: s3://my-bucket/output/
+  mode: overwrite

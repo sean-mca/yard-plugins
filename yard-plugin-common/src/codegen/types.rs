@@ -163,6 +163,7 @@ pub struct Source {
 
     /// Column names (used by some source types).
     #[serde(default)]
+    #[allow(dead_code)]
     pub columns: Vec<String>,
 }
 

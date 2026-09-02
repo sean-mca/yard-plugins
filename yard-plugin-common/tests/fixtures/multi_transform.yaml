@@ -1,0 +1,30 @@
+job_type: glue
+sources:
+  - name: orders
+    source_type: s3
+    format: parquet
+    path: s3://my-bucket/orders/
+  - name: customers
+    source_type: s3
+    format: parquet
+    path: s3://my-bucket/customers/
+transforms:
+  - transform_type: filter
+    source: orders
+    output: orders
+    condition: "col('amount') > 100"
+  - transform_type: sql
+    output: enriched
+    query: SELECT o.*, c.name FROM orders o JOIN customers c ON o.customer_id = c.id
+  - transform_type: join
+    left: orders
+    right: customers
+    on: customer_id
+    how: inner
+    output: joined
+sink:
+  source: joined
+  sink_type: s3
+  format: parquet
+  path: s3://my-bucket/enriched-orders/
+  mode: overwrite

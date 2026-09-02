@@ -1,0 +1,13 @@
+job_type: glue
+sources:
+  - name: weather
+    source_type: api
+    url: https://api.weather.gov/stations
+    headers:
+      Accept: application/json
+      User-Agent: yard/1.0
+sink:
+  sink_type: s3
+  format: parquet
+  path: s3://my-bucket/weather/
+  mode: overwrite

@@ -1,0 +1,15 @@
+job_type: glue
+sources:
+  - name: events
+    source_type: s3
+    format: parquet
+    path: s3://my-bucket/events/
+sink:
+  sink_type: iceberg
+  database: analytics
+  table: events
+  mode: append
+  fill_nulls: true
+config:
+  glue:
+    warehouse: s3://my-bucket/iceberg-warehouse/

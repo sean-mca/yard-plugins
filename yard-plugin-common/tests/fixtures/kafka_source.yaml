@@ -1,0 +1,11 @@
+job_type: glue
+sources:
+  - name: stream
+    source_type: kafka
+    connection_url: kafka-broker:9092
+    topic: click-events
+sink:
+  sink_type: s3
+  format: parquet
+  path: s3://my-bucket/kafka-output/
+  mode: append

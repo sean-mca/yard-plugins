@@ -1,0 +1,14 @@
+job_type: glue
+sources:
+  - name: events
+    source_type: s3
+    format: parquet
+    path: s3://my-bucket/events/
+mask_pii:
+  - USA_SSN
+  - CREDIT_CARD
+sink:
+  sink_type: s3
+  format: parquet
+  path: s3://my-bucket/redacted/
+  mode: overwrite

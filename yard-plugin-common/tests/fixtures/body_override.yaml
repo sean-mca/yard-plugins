@@ -1,0 +1,4 @@
+job_type: glue
+body: |
+  df = spark.read.parquet("s3://custom/path")
+  df.write.parquet("s3://custom/output")
