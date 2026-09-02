@@ -1,0 +1,14 @@
+[package]
+name = "yard-plugin-glue"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "yard-plugin-glue"
+path = "src/main.rs"
+
+[dependencies]
+yard-plugin-sdk = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
