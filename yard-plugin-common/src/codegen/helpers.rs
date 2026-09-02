@@ -38,6 +38,39 @@ pub(super) fn render_imports(imports: &[Import]) -> String {
     rendered.join("\n")
 }
 
+// --- Python identifier validation ---
+
+/// Check whether `s` is a valid Python identifier fragment (ASCII
+/// letters, digits, and underscores; must not start with a digit or be
+/// empty). Used to validate user-supplied names before they are
+/// embedded as parts of Python variable names in generated code.
+#[must_use]
+pub(super) fn is_python_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Validate that `s` is a valid Python identifier fragment, returning
+/// a descriptive error otherwise.
+///
+/// # Errors
+///
+/// Returns an error when `s` is empty or contains characters invalid
+/// in a Python identifier (spaces, hyphens, leading digit, etc.).
+pub(super) fn require_python_identifier(s: &str, context: &str) -> Result<()> {
+    if is_python_identifier(s) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{context}: '{s}' is not a valid Python identifier \
+             (must be non-empty, ASCII letters/digits/underscores, \
+             and not start with a digit)"
+        ))
+    }
+}
+
 // --- Python string escaping ---
 
 /// Escape a string and wrap it in double quotes for embedding inside

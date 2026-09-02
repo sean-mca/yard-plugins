@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 
 use crate::codegen::types::Transform;
 
-use super::helpers::{python_str_literal, quoted_list};
+use super::helpers::{python_str_literal, quoted_list, require_python_identifier};
 
 /// Resolve the input and output dataframe variable names for a transform.
 ///
@@ -162,6 +162,7 @@ pub(super) fn render_transform(
                 .as_deref()
                 .ok_or_else(|| anyhow!("window transform: 'name' is required"))?
                 .trim();
+            require_python_identifier(col_name, "window transform 'name'")?;
             let expr = transform
                 .expression
                 .as_deref()
