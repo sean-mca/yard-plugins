@@ -223,10 +223,12 @@ pub struct Sink {
 
     /// Additional Spark writer options.
     #[serde(default)]
+    #[allow(dead_code)]
     pub options: HashMap<String, serde_json::Value>,
 
     /// Glue catalog ID for Iceberg sinks.
     #[serde(default)]
+    #[allow(dead_code)]
     pub catalog_id: Option<String>,
 }
 
