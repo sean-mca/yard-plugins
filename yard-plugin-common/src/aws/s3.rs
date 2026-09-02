@@ -25,7 +25,9 @@ impl S3ScriptOps {
     /// `scripts` + `my_job` → `scripts/my_job.py`.
     #[inline]
     pub fn script_key(&self, job_name: &str) -> String {
-        if self.script_prefix.ends_with('/') {
+        if self.script_prefix.is_empty() {
+            format!("{job_name}.py")
+        } else if self.script_prefix.ends_with('/') {
             format!("{}{job_name}.py", self.script_prefix)
         } else {
             format!("{}/{job_name}.py", self.script_prefix)
@@ -169,6 +171,6 @@ mod tests {
     #[test]
     fn script_key_with_empty_prefix() {
         let ops = ops_with_prefix("");
-        assert_eq!(ops.script_key("my_job"), "/my_job.py");
+        assert_eq!(ops.script_key("my_job"), "my_job.py");
     }
 }
