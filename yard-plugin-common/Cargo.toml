@@ -1,0 +1,21 @@
+[package]
+name = "yard-plugin-common"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "yard_plugin_common"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tera = "2.3"
+aws-sdk-s3 = { version = "1.144", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+aws-config = { version = "1.11", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "sso"] }
+tracing = "0.1"
+
+[dev-dependencies]
+insta = "1.48"
+serde_yaml = "0.9"
