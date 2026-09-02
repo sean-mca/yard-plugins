@@ -6,13 +6,13 @@
 //! ## Credential Precedence (D-06)
 //!
 //! AssumeRole parameters are resolved with request JSON taking highest
-//! priority, then environment variables, then YAML config values:
+//! priority, then environment variables:
 //!
-//! | Parameter      | 1st (request JSON)              | 2nd (env var)               | 3rd (YAML config)         |
-//! |----------------|---------------------------------|-----------------------------|---------------------------|
-//! | `assume_role`  | `aws_cfg["assume_role"]`        | `YARD_AWS_ASSUME_ROLE`      | yaml `assume_role`        |
-//! | `session_name` | —                               | `YARD_AWS_SESSION_NAME`     | yaml `session_name`       |
-//! | `external_id`  | —                               | `YARD_AWS_EXTERNAL_ID`      | yaml `external_id`        |
+//! | Parameter      | 1st (request JSON)              | 2nd (env var)               |
+//! |----------------|---------------------------------|-----------------------------|
+//! | `assume_role`  | `aws_cfg["assume_role"]`        | `YARD_AWS_ASSUME_ROLE`      |
+//! | `session_name` | `aws_cfg["session_name"]`       | `YARD_AWS_SESSION_NAME`     |
+//! | `external_id`  | `aws_cfg["external_id"]`        | `YARD_AWS_EXTERNAL_ID`      |
 //!
 //! When no role ARN is found, falls through to the default provider chain
 //! (env vars, shared config, IMDS/ECS task role, SSO).
@@ -28,41 +28,33 @@ use serde_json::Value;
 /// Resolution of AssumeRole params:
 ///   1. Request JSON (`aws_cfg["assume_role"]`) — per-job isolation
 ///   2. `YARD_AWS_ASSUME_ROLE` env var — CI override
-///   3. YAML config `assume_role` field — project-level default
-///   4. Default provider chain (no AssumeRole)
+///   3. Default provider chain (no AssumeRole)
 ///
-/// Session name and external ID follow the same env-then-yaml pattern
-/// (request JSON does not carry these; they come from the deployment
-/// context rather than per-job config).
+/// Session name and external ID follow the same two-tier pattern
+/// (request JSON, then env var).
 pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::SdkConfig {
     let region_obj = aws_config::Region::new(region.to_string());
     let base = aws_config::defaults(BehaviorVersion::latest())
         .region(region_obj.clone())
         .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
 
-    let yaml_str = |key: &str| {
+    let cfg_str = |key: &str| {
         aws_cfg
             .and_then(|v| v.get(key))
             .and_then(|v| v.as_str())
             .map(String::from)
     };
 
-    // D-06 precedence: request JSON > env var > YAML config > default chain
-    let assume_role = aws_cfg
-        .and_then(|v| v.get("assume_role"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| std::env::var("YARD_AWS_ASSUME_ROLE").ok())
-        .or_else(|| yaml_str("assume_role"));
+    // D-06 precedence: request JSON > env var > default chain
+    let assume_role = cfg_str("assume_role")
+        .or_else(|| std::env::var("YARD_AWS_ASSUME_ROLE").ok());
 
     if let Some(role_arn) = assume_role {
-        let session_name = std::env::var("YARD_AWS_SESSION_NAME")
-            .ok()
-            .or_else(|| yaml_str("session_name"))
+        let session_name = cfg_str("session_name")
+            .or_else(|| std::env::var("YARD_AWS_SESSION_NAME").ok())
             .unwrap_or_else(|| "yard".to_string());
-        let external_id = std::env::var("YARD_AWS_EXTERNAL_ID")
-            .ok()
-            .or_else(|| yaml_str("external_id"));
+        let external_id = cfg_str("external_id")
+            .or_else(|| std::env::var("YARD_AWS_EXTERNAL_ID").ok());
 
         let mut builder = aws_config::sts::AssumeRoleProvider::builder(role_arn)
             .session_name(session_name)
