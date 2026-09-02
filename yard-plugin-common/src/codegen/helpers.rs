@@ -305,11 +305,18 @@ pub(super) fn should_fill_nulls(config: &JobConfig) -> bool {
 /// Emit Python lines that derive partition columns (year/month/day) from
 /// a timestamp column, adding them to the dataframe only when absent.
 ///
-/// Returns `None` when `config.partition_by` is empty.
-#[must_use]
-pub(super) fn render_partition_derivation(config: &JobConfig, sink_source: &str) -> Option<String> {
+/// Returns `Ok(None)` when `config.partition_by` is empty.
+///
+/// # Errors
+///
+/// Returns an error when `config.partition_by` contains an unrecognized
+/// unit (anything other than "year", "month", or "day").
+pub(super) fn render_partition_derivation(
+    config: &JobConfig,
+    sink_source: &str,
+) -> Result<Option<String>> {
     if config.partition_by.is_empty() {
-        return None;
+        return Ok(None);
     }
     let var = format!("df_{sink_source}");
     let mut lines = Vec::with_capacity(2 + config.partition_by.len());
@@ -331,7 +338,11 @@ pub(super) fn render_partition_derivation(config: &JobConfig, sink_source: &str)
             "year" => "year",
             "month" => "month",
             "day" => "dayofmonth",
-            _ => continue,
+            other => {
+                return Err(anyhow!(
+                    "unsupported partition_by unit: '{other}' (expected year, month, or day)"
+                ));
+            }
         };
         let escaped_unit = python_str_literal(unit);
         lines.push(format!(
@@ -339,7 +350,7 @@ pub(super) fn render_partition_derivation(config: &JobConfig, sink_source: &str)
              {var} = {var}.withColumn({escaped_unit}, F.{func}(F.col(_ts)))"
         ));
     }
-    Some(lines.join("\n"))
+    Ok(Some(lines.join("\n")))
 }
 
 /// True when any transform requires `from pyspark.sql import functions as F`.

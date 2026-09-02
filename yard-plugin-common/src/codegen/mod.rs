@@ -305,7 +305,7 @@ pub fn generate_pyspark(job_name: &str, job_config: &serde_json::Value) -> Resul
         }
         if let Some(sink) = &config.sink {
             let sink_source = sink.source.as_deref().unwrap_or(default_source);
-            if let Some(deriv) = render_partition_derivation(&config, sink_source) {
+            if let Some(deriv) = render_partition_derivation(&config, sink_source)? {
                 parts.push(deriv);
             }
             if !config.mask_pii.is_empty() {
