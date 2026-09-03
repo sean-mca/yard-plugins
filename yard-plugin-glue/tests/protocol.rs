@@ -40,7 +40,7 @@ fn handshake_contains_plugin_identity() {
 }
 
 #[test]
-fn validate_returns_empty_errors() {
+fn validate_catches_missing_role_and_script_bucket() {
     let request = json!({
         "operation": "validate",
         "job_name": "test-job",
@@ -57,15 +57,28 @@ fn validate_returns_empty_errors() {
 
     let (_, response) = parse_protocol_output(&output.stdout);
     let errors = response["errors"].as_array().unwrap();
-    assert!(errors.is_empty(), "stub validate should return empty errors");
+    assert!(!errors.is_empty(), "empty config should produce validation errors");
+
+    // Should flag missing role
+    let has_role_error = errors.iter().any(|e| e["field"] == "role");
+    assert!(has_role_error, "should report missing role; errors: {errors:?}");
+
+    // Should flag missing script_bucket
+    let has_bucket_error = errors.iter().any(|e| e["field"] == "glue.script_bucket");
+    assert!(has_bucket_error, "should report missing script_bucket; errors: {errors:?}");
 }
 
 #[test]
-fn codegen_returns_null_script() {
+fn validate_accepts_valid_config() {
     let request = json!({
-        "operation": "codegen",
+        "operation": "validate",
         "job_name": "test-job",
-        "job_config": {}
+        "job_config": {
+            "role": "arn:aws:iam::123:role/Test",
+            "glue": {
+                "script_bucket": "my-bucket"
+            }
+        }
     });
 
     let output = Command::cargo_bin("yard-plugin-glue")
@@ -77,7 +90,46 @@ fn codegen_returns_null_script() {
     assert!(output.status.success());
 
     let (_, response) = parse_protocol_output(&output.stdout);
-    assert!(response["script"].is_null(), "stub codegen should return null script");
+    let errors = response["errors"].as_array().unwrap();
+    assert!(errors.is_empty(), "valid config should produce no errors; got: {errors:?}");
+}
+
+#[test]
+fn codegen_generates_pyspark_script() {
+    let request = json!({
+        "operation": "codegen",
+        "job_name": "test-job",
+        "job_config": {
+            "sources": [{
+                "name": "src",
+                "source_type": "s3",
+                "path": "s3://bucket/input/",
+                "format": "parquet"
+            }],
+            "sink": {
+                "sink_type": "s3",
+                "path": "s3://bucket/output/",
+                "format": "parquet"
+            }
+        }
+    });
+
+    let output = Command::cargo_bin("yard-plugin-glue")
+        .unwrap()
+        .write_stdin(format!("{}\n", request))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "codegen failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+    let (_, response) = parse_protocol_output(&output.stdout);
+    let script = response["script"].as_str()
+        .expect("codegen should return a non-null script string");
+    assert!(!script.is_empty(), "script should not be empty");
+    assert!(
+        script.contains("GlueContext") || script.contains("SparkSession"),
+        "script should contain PySpark markers; got: {}", &script[..200.min(script.len())]
+    );
 }
 
 #[test]
@@ -144,7 +196,7 @@ fn verify_returns_empty_statuses() {
 }
 
 #[test]
-fn schema_returns_default_response() {
+fn schema_returns_full_field_definitions() {
     let request = json!({ "operation": "schema" });
 
     let output = Command::cargo_bin("yard-plugin-glue")
@@ -156,6 +208,24 @@ fn schema_returns_default_response() {
     assert!(output.status.success());
 
     let (_, response) = parse_protocol_output(&output.stdout);
+
+    // Exactly 12 field entries
     let fields = response["fields"].as_array().unwrap();
-    assert!(fields.is_empty(), "stub schema should return empty fields");
+    assert_eq!(fields.len(), 12, "schema should return 12 fields; got {}", fields.len());
+
+    // 5 supported source types
+    let source_types = response["supported_source_types"].as_array().unwrap();
+    assert_eq!(source_types.len(), 5, "should have 5 source types; got {}", source_types.len());
+
+    // 4 supported sink types
+    let sink_types = response["supported_sink_types"].as_array().unwrap();
+    assert_eq!(sink_types.len(), 4, "should have 4 sink types; got {}", sink_types.len());
+
+    // script_bucket is required
+    let bucket_field = fields.iter().find(|f| f["name"] == "script_bucket").unwrap();
+    assert_eq!(bucket_field["required"], true, "script_bucket should be required");
+
+    // region is not required
+    let region_field = fields.iter().find(|f| f["name"] == "region").unwrap();
+    assert_eq!(region_field["required"], false, "region should not be required");
 }
