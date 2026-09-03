@@ -8,4 +8,4 @@ pub mod config;
 pub mod s3;
 
 pub use config::aws_config;
-pub use s3::S3ScriptOps;
+pub use s3::{S3Client, S3ScriptOps};

@@ -5,7 +5,7 @@
 //! scripts stored in S3.
 
 use anyhow::{Context, Result};
-use aws_sdk_s3::Client as S3Client;
+pub use aws_sdk_s3::Client as S3Client;
 
 /// Shared S3 script operations used by all providers that upload
 /// generated PySpark scripts to S3.

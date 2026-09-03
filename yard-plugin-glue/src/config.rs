@@ -6,8 +6,6 @@
 //!
 //! The struct and helpers are used by deploy/destroy/verify in Plan 02.
 
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use std::collections::HashMap;
 
