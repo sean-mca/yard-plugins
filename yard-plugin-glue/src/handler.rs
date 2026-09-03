@@ -1,15 +1,21 @@
 //! Glue plugin handler implementing the `PluginHandler` trait.
 //!
 //! Implements validate (10 rules), codegen (via `generate_pyspark`),
-//! and schema (12 fields + source/sink types). Deploy/destroy/verify
-//! remain stubbed for Plan 02.
+//! deploy (S3 upload + Glue create-or-update upsert per D-08), destroy
+//! (Glue delete + non-fatal S3 cleanup per D-09), verify (resource
+//! existence checks per AWS-06), and schema (12 fields + source/sink
+//! types).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use yard_plugin_common::aws::{aws_config, S3Client, S3ScriptOps};
 use yard_plugin_common::codegen::generate_pyspark;
 use yard_plugin_sdk::{
-    CodegenResponse, DeployResponse, DestroyResponse, PluginHandler, PluginValidationError,
-    Resource, SchemaField, SchemaResponse, ValidateResponse, VerifyResponse,
+    tracing, CodegenResponse, DeployResponse, DestroyResponse, PluginHandler,
+    PluginValidationError, Resource, ResourceStatus, SchemaField, SchemaResponse,
+    ValidateResponse, VerifyResponse,
 };
+
+use crate::config::{build_default_arguments, GlueConfig};
 
 /// Valid Glue worker type identifiers.
 const VALID_WORKER_TYPES: &[&str] = &["G.025X", "G.1X", "G.2X", "G.4X", "G.8X", "Z.2X"];
@@ -29,16 +35,189 @@ fn validation_error(field: &str, message: &str) -> PluginValidationError {
     }
 }
 
+/// Extract and deserialize the `glue` sub-block from a job config.
+fn extract_glue_config(job_config: &serde_json::Value) -> Result<GlueConfig> {
+    let glue_block = job_config
+        .get("glue")
+        .ok_or_else(|| anyhow::anyhow!("missing glue config block"))?;
+    serde_json::from_value(glue_block.clone()).context("failed to parse glue config block")
+}
+
+/// Parse an S3 URI (`s3://bucket/key`) into `(bucket, key)`.
+///
+/// Returns `None` if the URI is not in the expected format or has
+/// empty bucket/key components.
+fn parse_s3_uri(uri: &str) -> Option<(&str, &str)> {
+    let stripped = uri.strip_prefix("s3://")?;
+    let (bucket, key) = stripped.split_once('/')?;
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((bucket, key))
+}
+
+/// Create or update a Glue job via the AWS API (update-first upsert per D-08).
+///
+/// Tries `UpdateJob` first. If the job does not exist
+/// (`EntityNotFoundException`), falls back to `CreateJob`.
+async fn create_or_update_glue_job(
+    client: &aws_sdk_glue::Client,
+    job_name: &str,
+    script_location: &str,
+    job_config: &serde_json::Value,
+    glue_cfg: &GlueConfig,
+) -> Result<()> {
+    let execution_role = job_config
+        .get("role")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Job \"{job_name}\" requires a \"role\" (Glue execution role)")
+        })?;
+
+    let command = aws_sdk_glue::types::JobCommand::builder()
+        .name("glueetl")
+        .script_location(script_location)
+        .python_version("3")
+        .build();
+
+    let default_args = build_default_arguments(glue_cfg);
+
+    // Build the update payload
+    let mut update_builder = aws_sdk_glue::types::JobUpdate::builder()
+        .role(execution_role)
+        .command(command.clone())
+        .glue_version(&glue_cfg.glue_version)
+        .worker_type(aws_sdk_glue::types::WorkerType::from(
+            glue_cfg.worker_type.as_str(),
+        ))
+        .number_of_workers(glue_cfg.number_of_workers);
+
+    if let Some(timeout) = glue_cfg.timeout {
+        update_builder = update_builder.timeout(timeout);
+    }
+    if let Some(max_retries) = glue_cfg.max_retries {
+        update_builder = update_builder.max_retries(max_retries);
+    }
+    if let Some(max_concurrent) = glue_cfg.max_concurrent_runs {
+        update_builder = update_builder.execution_property(
+            aws_sdk_glue::types::ExecutionProperty::builder()
+                .max_concurrent_runs(max_concurrent)
+                .build(),
+        );
+    }
+    if !glue_cfg.connections.is_empty() {
+        update_builder = update_builder.connections(
+            aws_sdk_glue::types::ConnectionsList::builder()
+                .set_connections(Some(glue_cfg.connections.clone()))
+                .build(),
+        );
+    }
+    for (k, v) in &default_args {
+        update_builder = update_builder.default_arguments(k.clone(), v.clone());
+    }
+
+    let update_result = client
+        .update_job()
+        .job_name(job_name)
+        .job_update(update_builder.build())
+        .send()
+        .await;
+
+    match update_result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if e.as_service_error()
+                .is_some_and(|se| se.is_entity_not_found_exception())
+            {
+                // Job doesn't exist yet -- create it
+                let mut create_builder = client
+                    .create_job()
+                    .name(job_name)
+                    .role(execution_role)
+                    .command(command)
+                    .glue_version(&glue_cfg.glue_version)
+                    .worker_type(aws_sdk_glue::types::WorkerType::from(
+                        glue_cfg.worker_type.as_str(),
+                    ))
+                    .number_of_workers(glue_cfg.number_of_workers);
+
+                if let Some(timeout) = glue_cfg.timeout {
+                    create_builder = create_builder.timeout(timeout);
+                }
+                if let Some(max_retries) = glue_cfg.max_retries {
+                    create_builder = create_builder.max_retries(max_retries);
+                }
+                if let Some(max_concurrent) = glue_cfg.max_concurrent_runs {
+                    create_builder = create_builder.execution_property(
+                        aws_sdk_glue::types::ExecutionProperty::builder()
+                            .max_concurrent_runs(max_concurrent)
+                            .build(),
+                    );
+                }
+                if !glue_cfg.connections.is_empty() {
+                    create_builder = create_builder.connections(
+                        aws_sdk_glue::types::ConnectionsList::builder()
+                            .set_connections(Some(glue_cfg.connections.clone()))
+                            .build(),
+                    );
+                }
+                for (k, v) in &default_args {
+                    create_builder =
+                        create_builder.default_arguments(k.clone(), v.clone());
+                }
+
+                create_builder
+                    .send()
+                    .await
+                    .with_context(|| format!("Failed to create Glue job \"{job_name}\""))?;
+                Ok(())
+            } else {
+                Err(e).with_context(|| format!("Failed to update Glue job \"{job_name}\""))
+            }
+        }
+    }
+}
+
+/// Delete a Glue job by name.
+async fn delete_glue_job(client: &aws_sdk_glue::Client, job_name: &str) -> Result<()> {
+    client
+        .delete_job()
+        .job_name(job_name)
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete Glue job \"{job_name}\""))?;
+    Ok(())
+}
+
+/// Check whether a Glue job exists by name.
+///
+/// Returns `true` if `GetJob` succeeds, `false` if the job is not
+/// found (`EntityNotFoundException`), or an error for other failures.
+async fn glue_job_exists(client: &aws_sdk_glue::Client, job_name: &str) -> Result<bool> {
+    let result = client.get_job().job_name(job_name).send().await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            if e.as_service_error()
+                .is_some_and(|se| se.is_entity_not_found_exception())
+            {
+                Ok(false)
+            } else {
+                Err(e).with_context(|| format!("Failed to check Glue job: {job_name}"))
+            }
+        }
+    }
+}
+
 /// AWS Glue provider plugin handler.
 ///
 /// Holds an embedded tokio runtime for bridging sync trait methods to
-/// async AWS SDK calls. The `_rt` field keeps the runtime alive so
-/// the `rt` handle remains valid for `block_on` in later phases.
+/// async AWS SDK calls.
 pub(crate) struct GlueHandler {
     /// Tokio runtime -- kept alive so the handle remains valid.
     _rt: tokio::runtime::Runtime,
     /// Handle for `block_on` bridging in handler methods.
-    #[allow(dead_code)]
     rt: tokio::runtime::Handle,
 }
 
@@ -211,19 +390,155 @@ impl PluginHandler for GlueHandler {
 
     fn deploy(
         &self,
-        _job_name: &str,
-        _job_config: &serde_json::Value,
-        _artifact: &str,
+        job_name: &str,
+        job_config: &serde_json::Value,
+        artifact: &str,
     ) -> Result<DeployResponse> {
-        Ok(DeployResponse { resources: vec![] })
+        self.rt.block_on(async {
+            let glue_cfg = extract_glue_config(job_config)?;
+
+            // Early validation: role is required for Glue job creation
+            if !job_config
+                .get("role")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+            {
+                anyhow::bail!("deploy requires a non-empty \"role\" in job_config");
+            }
+
+            let sdk_config =
+                aws_config(&glue_cfg.region, glue_cfg.aws.as_ref()).await;
+            let glue_client = aws_sdk_glue::Client::new(&sdk_config);
+            let s3_client = S3Client::new(&sdk_config);
+
+            let s3_ops = S3ScriptOps {
+                s3_client,
+                script_bucket: glue_cfg
+                    .script_bucket
+                    .clone()
+                    .unwrap_or_default(),
+                script_prefix: glue_cfg.script_prefix.clone(),
+            };
+
+            let script_location =
+                s3_ops.upload_script(job_name, artifact).await?;
+
+            create_or_update_glue_job(
+                &glue_client,
+                job_name,
+                &script_location,
+                job_config,
+                &glue_cfg,
+            )
+            .await?;
+
+            Ok(DeployResponse {
+                resources: vec![
+                    Resource {
+                        r#type: "s3_object".to_string(),
+                        id: script_location,
+                        provider: "glue".to_string(),
+                    },
+                    Resource {
+                        r#type: "glue_job".to_string(),
+                        id: job_name.to_string(),
+                        provider: "glue".to_string(),
+                    },
+                ],
+            })
+        })
     }
 
-    fn destroy(&self, _job_name: &str, _resources: &[Resource]) -> Result<DestroyResponse> {
-        Ok(DestroyResponse {})
+    fn destroy(
+        &self,
+        _job_name: &str,
+        resources: &[Resource],
+    ) -> Result<DestroyResponse> {
+        self.rt.block_on(async {
+            let region = std::env::var("AWS_DEFAULT_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_string());
+            let sdk_config = aws_config(&region, None).await;
+            let glue_client = aws_sdk_glue::Client::new(&sdk_config);
+            let s3_client = S3Client::new(&sdk_config);
+
+            // Delete Glue jobs (fatal)
+            for resource in resources {
+                if resource.r#type == "glue_job" {
+                    delete_glue_job(&glue_client, &resource.id).await?;
+                }
+            }
+
+            // S3 cleanup (non-fatal per D-09)
+            for resource in resources {
+                if resource.r#type == "s3_object" {
+                    if let Some((bucket, key)) = parse_s3_uri(&resource.id) {
+                        if let Err(e) = s3_client
+                            .delete_object()
+                            .bucket(bucket)
+                            .key(key)
+                            .send()
+                            .await
+                        {
+                            tracing::warn!(
+                                "Non-fatal: failed to delete S3 object {}: {e}",
+                                resource.id
+                            );
+                        }
+                    }
+                }
+            }
+
+            Ok(DestroyResponse {})
+        })
     }
 
-    fn verify(&self, _job_name: &str, _resources: &[Resource]) -> Result<VerifyResponse> {
-        Ok(VerifyResponse { statuses: vec![] })
+    fn verify(
+        &self,
+        _job_name: &str,
+        resources: &[Resource],
+    ) -> Result<VerifyResponse> {
+        self.rt.block_on(async {
+            let region = std::env::var("AWS_DEFAULT_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_string());
+            let sdk_config = aws_config(&region, None).await;
+            let glue_client = aws_sdk_glue::Client::new(&sdk_config);
+            let s3_client = S3Client::new(&sdk_config);
+
+            let mut statuses = Vec::with_capacity(resources.len());
+
+            for resource in resources {
+                let exists = match resource.r#type.as_str() {
+                    "s3_object" => {
+                        if let Some((bucket, key)) = parse_s3_uri(&resource.id)
+                        {
+                            let s3_ops = S3ScriptOps {
+                                s3_client: s3_client.clone(),
+                                script_bucket: bucket.to_string(),
+                                script_prefix: String::new(),
+                            };
+                            s3_ops.s3_object_exists(key).await?
+                        } else {
+                            tracing::warn!(
+                                "Could not parse S3 URI: {}",
+                                resource.id
+                            );
+                            false
+                        }
+                    }
+                    "glue_job" => {
+                        glue_job_exists(&glue_client, &resource.id).await?
+                    }
+                    _ => true, // Unknown resource types assumed to exist
+                };
+
+                statuses.push(ResourceStatus {
+                    resource: resource.clone(),
+                    exists,
+                });
+            }
+
+            Ok(VerifyResponse { statuses })
+        })
     }
 
     fn schema(&self) -> Result<SchemaResponse> {
