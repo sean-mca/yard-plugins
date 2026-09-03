@@ -133,66 +133,158 @@ fn codegen_generates_pyspark_script() {
 }
 
 #[test]
-fn deploy_returns_empty_resources() {
+fn deploy_processes_request_without_crash() {
     let request = json!({
         "operation": "deploy",
         "job_name": "test-job",
-        "job_config": {},
-        "artifact": "s3://bucket/script.py"
+        "job_config": {
+            "role": "arn:aws:iam::123:role/Test",
+            "glue": {
+                "script_bucket": "test-bucket",
+                "script_prefix": "scripts/"
+            }
+        },
+        "artifact": "print('hello')"
     });
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    // Without AWS credentials the handler errors and the binary exits 1.
+    // The key assertion: no crash (panic/signal), and the protocol
+    // handshake was written before the error.
+    let exit_code = output.status.code()
+        .expect("process should exit with a code, not a signal");
+    assert!(
+        exit_code == 0 || exit_code == 1,
+        "unexpected exit code {exit_code}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let (_, response) = parse_protocol_output(&output.stdout);
-    let resources = response["resources"].as_array().unwrap();
-    assert!(resources.is_empty(), "stub deploy should return empty resources");
+    let text = String::from_utf8(output.stdout.to_vec()).unwrap();
+    let lines: Vec<&str> = text.trim().lines().collect();
+    assert!(!lines.is_empty(), "stdout should contain at least the handshake line");
+
+    // First line is always the handshake
+    let handshake: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("handshake line should be valid JSON");
+    assert_eq!(handshake["name"], "yard-plugin-glue");
+
+    // If the handler succeeded (unlikely without creds), verify response
+    if exit_code == 0 {
+        assert_eq!(lines.len(), 2, "successful response should have 2 lines");
+        let response: serde_json::Value = serde_json::from_str(lines[1])
+            .expect("response line should be valid JSON");
+        if let Some(resources) = response.get("resources") {
+            assert!(resources.is_array(), "resources should be an array");
+        }
+    }
 }
 
 #[test]
-fn destroy_returns_empty_object() {
+fn destroy_processes_request_without_crash() {
     let request = json!({
         "operation": "destroy",
         "job_name": "test-job",
-        "resources": []
+        "resources": [{
+            "type": "glue_job",
+            "id": "test-job",
+            "provider": "glue"
+        }]
     });
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    // Without AWS credentials the handler errors and the binary exits 1.
+    let exit_code = output.status.code()
+        .expect("process should exit with a code, not a signal");
+    assert!(
+        exit_code == 0 || exit_code == 1,
+        "unexpected exit code {exit_code}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let (_, response) = parse_protocol_output(&output.stdout);
-    assert!(response.is_object(), "destroy response should be a JSON object");
+    let text = String::from_utf8(output.stdout.to_vec()).unwrap();
+    let lines: Vec<&str> = text.trim().lines().collect();
+    assert!(!lines.is_empty(), "stdout should contain at least the handshake line");
+
+    // Handshake is always first
+    let handshake: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("handshake line should be valid JSON");
+    assert_eq!(handshake["name"], "yard-plugin-glue");
+
+    // On success (exit 0), verify the response structure
+    if exit_code == 0 {
+        assert_eq!(lines.len(), 2, "successful response should have 2 lines");
+        let response: serde_json::Value = serde_json::from_str(lines[1])
+            .expect("response line should be valid JSON");
+        assert!(response.is_object(), "destroy response should be a JSON object");
+    }
 }
 
 #[test]
-fn verify_returns_empty_statuses() {
+fn verify_processes_request_without_crash() {
     let request = json!({
         "operation": "verify",
         "job_name": "test-job",
-        "resources": []
+        "resources": [
+            {
+                "type": "s3_object",
+                "id": "s3://test-bucket/scripts/test-job.py",
+                "provider": "glue"
+            },
+            {
+                "type": "glue_job",
+                "id": "test-job",
+                "provider": "glue"
+            }
+        ]
     });
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    // Without AWS credentials the handler errors and the binary exits 1.
+    let exit_code = output.status.code()
+        .expect("process should exit with a code, not a signal");
+    assert!(
+        exit_code == 0 || exit_code == 1,
+        "unexpected exit code {exit_code}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let (_, response) = parse_protocol_output(&output.stdout);
-    let statuses = response["statuses"].as_array().unwrap();
-    assert!(statuses.is_empty(), "stub verify should return empty statuses");
+    let text = String::from_utf8(output.stdout.to_vec()).unwrap();
+    let lines: Vec<&str> = text.trim().lines().collect();
+    assert!(!lines.is_empty(), "stdout should contain at least the handshake line");
+
+    // Handshake is always first
+    let handshake: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("handshake line should be valid JSON");
+    assert_eq!(handshake["name"], "yard-plugin-glue");
+
+    // On success (exit 0), verify the response structure
+    if exit_code == 0 {
+        assert_eq!(lines.len(), 2, "successful response should have 2 lines");
+        let response: serde_json::Value = serde_json::from_str(lines[1])
+            .expect("response line should be valid JSON");
+        assert!(response.is_object(), "verify response should be a JSON object");
+    }
 }
 
 #[test]
