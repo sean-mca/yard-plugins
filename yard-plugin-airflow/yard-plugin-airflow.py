@@ -887,6 +887,27 @@ def handle_validate(job_name, job_config):
                         "message": "composite trigger items must be a non-empty list",
                         "severity": "error",
                     })
+                elif isinstance(items, list):
+                    # Recurse into composite items for source-level validation
+                    for idx, item in enumerate(items):
+                        if not isinstance(item, dict):
+                            continue
+                        if "s3" in item:
+                            s3 = item["s3"]
+                            if isinstance(s3, dict) and not s3.get("bucket", ""):
+                                errors.append({
+                                    "field": "trigger.{}.{}.s3.bucket".format(comp_key, idx),
+                                    "message": "S3 trigger bucket must be non-empty",
+                                    "severity": "error",
+                                })
+                        if "sqs" in item:
+                            sqs = item["sqs"]
+                            if isinstance(sqs, dict) and not sqs.get("queue_url", ""):
+                                errors.append({
+                                    "field": "trigger.{}.{}.sqs.queue_url".format(comp_key, idx),
+                                    "message": "SQS trigger queue_url must be non-empty",
+                                    "severity": "error",
+                                })
 
     # Rule: connection_id syntax validation (D-11)
     tasks = job_config.get("tasks", [])
