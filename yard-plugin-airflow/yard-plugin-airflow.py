@@ -668,6 +668,10 @@ def render_dag(job_name, job_config):
     """
     # D-06: default airflow version is 3
     version = job_config.get("airflow_version", 3)
+    if version not in VERSION_IMPORTS:
+        raise ValueError(
+            "unsupported airflow_version={!r} (must be 2 or 3)".format(version)
+        )
     vi = VERSION_IMPORTS[version]
 
     schedule = job_config.get("schedule")
