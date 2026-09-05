@@ -542,11 +542,12 @@ def render_composite_trigger(trigger, default_aws_conn_id, roots, version):
 
     # D-10: _yard_join only when 2+ sensor tasks
     sensor_deps = []
+    trigger_rule = "one_success" if "any" in trigger else "all_success"
     if len(all_sensor_tasks) >= 2:
         join_lines = [
             "    _yard_join = EmptyOperator(",
             '        task_id="_yard_join",',
-            '        trigger_rule="all_success",',
+            '        trigger_rule="{}",'.format(trigger_rule),
             "    )",
         ]
         all_sensor_tasks.append("\n".join(join_lines))
