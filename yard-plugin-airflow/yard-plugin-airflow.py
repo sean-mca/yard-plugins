@@ -686,6 +686,11 @@ def render_dag(job_name, job_config):
         depends_on = task.get("depends_on", [])
         if not depends_on:
             roots.append(tid)
+        for dep in depends_on:
+            if dep not in all_task_ids:
+                raise ValueError(
+                    "task '{}' depends_on unknown task '{}'".format(tid, dep)
+                )
 
     # Resolve default_aws_conn_id from config (D-12)
     default_aws_conn_id = job_config.get("aws_conn_id")
