@@ -1165,6 +1165,10 @@ def main():
 
     except Exception as exc:
         log.error("%s", exc)
+        # Write error response to stdout before exiting, matching Rust SDK behavior
+        error_response = {"error": str(exc)}
+        sys.stdout.write(json.dumps(error_response) + "\n")
+        sys.stdout.flush()
         sys.exit(1)
 
 
