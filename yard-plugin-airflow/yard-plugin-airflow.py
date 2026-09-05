@@ -72,6 +72,49 @@ VERSION_BANNERS = {
 }
 
 # ---------------------------------------------------------------------------
+# Trigger header helpers (ported from triggers.rs D-13 per-source caveats)
+# ---------------------------------------------------------------------------
+
+
+def dataset_header(uri, version):
+    """D-13: Dataset/Asset backfill caveat header."""
+    cls = VERSION_IMPORTS[version]["class_name"]
+    return (
+        "# Trigger: {cls} ({uri})\n"
+        "#\n"
+        "# Backfill caveat: {cls}s have no logical_date — historical re-runs do NOT\n"
+        "# replay missed {cls} events. Use API-trigger replay (see DOC-04) to backfill\n"
+        "# this DAG against synthetic dag_run.conf payloads.\n"
+    ).format(cls=cls, uri=uri)
+
+
+def s3_header(bucket, key=None, prefix=None):
+    """D-13: S3 backfill caveat header."""
+    if key:
+        target = "key={}".format(key)
+    elif prefix:
+        target = "prefix={}".format(prefix)
+    else:
+        target = ""
+    return (
+        "# Trigger: S3 (bucket={bucket}, {target})\n"
+        "#\n"
+        "# Backfill caveat: deferrable sensor re-pokes against current S3 state —\n"
+        "# original landed object is not replayable from event history.\n"
+    ).format(bucket=bucket, target=target)
+
+
+def sqs_header(queue_url):
+    """D-13: SQS backfill caveat header."""
+    return (
+        "# Trigger: SQS (queue_url={queue_url})\n"
+        "#\n"
+        "# Backfill caveat: SqsSensor drains the real queue — backfill is destructive\n"
+        "# and is not safe to run against a live queue.\n"
+    ).format(queue_url=queue_url)
+
+
+# ---------------------------------------------------------------------------
 # DAG template (ported from airflow_dag.py.tera -- Jinja2 variable-only)
 # ---------------------------------------------------------------------------
 DAG_TEMPLATE = """\
@@ -157,6 +200,23 @@ def render_default_args(config):
     return "{{\n{}\n}}".format("\n".join(entries))
 
 
+def render_outlets(task_config, version):
+    """Render outlets=[Class(uri)] kwarg fragment for tasks with publishes.
+
+    Returns a formatted line (with leading 8-space indent and trailing newline)
+    when the task has a 'publishes' list, or empty string otherwise.
+    """
+    publishes = task_config.get("publishes", [])
+    if not publishes:
+        return ""
+    vi = VERSION_IMPORTS[version]
+    outlets = ", ".join(
+        "{}({})".format(vi["class_name"], python_string_literal(uri))
+        for uri in publishes
+    )
+    return "        outlets=[{}],\n".format(outlets)
+
+
 def render_task(task_id, task_config, version):
     """Render a single task assignment inside the 'with DAG(...)' block.
 
@@ -165,6 +225,7 @@ def render_task(task_id, task_config, version):
     var = python_var_name(task_id)
     tid = python_string_literal(task_id)
     vi = VERSION_IMPORTS[version]
+    outlets_line = render_outlets(task_config, version)
 
     task_type = task_config.get("task_type", "")
 
@@ -174,10 +235,12 @@ def render_task(task_id, task_config, version):
             "    {var} = BashOperator(\n"
             "        task_id={tid},\n"
             "        bash_command={cmd},\n"
+            "{outlets}"
             "    )".format(
                 var=var,
                 tid=tid,
                 cmd=python_string_literal(cmd),
+                outlets=outlets_line,
             )
         )
     elif task_type == "glue":
@@ -192,6 +255,7 @@ def render_task(task_id, task_config, version):
             "        script_location={sl},\n"
             "        iam_role_arn={ir},\n"
             "        aws_conn_id={cn},\n"
+            "{outlets}"
             "    )".format(
                 var=var,
                 tid=tid,
@@ -199,6 +263,7 @@ def render_task(task_id, task_config, version):
                 sl=python_string_literal(script_location),
                 ir=python_string_literal(iam_role_arn),
                 cn=python_string_literal(aws_conn_id),
+                outlets=outlets_line,
             )
         )
     else:
@@ -209,27 +274,442 @@ def render_task(task_id, task_config, version):
         )
 
 
+# ---------------------------------------------------------------------------
+# Trigger rendering (ported from triggers.rs -- D-03 single entry point)
+# ---------------------------------------------------------------------------
+
+
+def render_single_trigger(source, default_aws_conn_id, roots, version):
+    """Render a single trigger source into codegen fragments.
+
+    Handles: schedule, dataset, s3, sqs, api source types.
+    Returns dict with keys: schedule_expr, sensor_tasks, sensor_deps,
+    extra_imports, max_active_runs, header_docstring.
+    """
+    vi = VERSION_IMPORTS[version]
+
+    if "schedule" in source:
+        return {
+            "schedule_expr": python_string_literal(source["schedule"]),
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [],
+            "max_active_runs": None,
+            "header_docstring": "",
+        }
+
+    if "dataset" in source:
+        uri = source["dataset"]["uri"]
+        return {
+            "schedule_expr": "[{}({})]".format(
+                vi["class_name"], python_string_literal(uri)
+            ),
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [vi["class_import"]],
+            "max_active_runs": None,
+            "header_docstring": dataset_header(uri, version),
+        }
+
+    if "s3" in source:
+        s3 = source["s3"]
+        bucket = s3["bucket"]
+        poke = s3.get("poke_interval", 60)
+        timeout = s3.get("timeout", 86400)
+        deferrable = s3.get("deferrable", True)
+        # S3-04 precedence (D-12): per-trigger > DAG-level > "aws_default"
+        conn = s3.get("aws_conn_id") or default_aws_conn_id or "aws_default"
+
+        bucket_key_value = s3.get("key") or s3.get("prefix") or ""
+
+        sensor_lines = [
+            "    _yard_wait_s3 = S3KeySensor(",
+            '        task_id="_yard_wait_s3",',
+            "        bucket_name={},".format(python_string_literal(bucket)),
+            "        bucket_key={},".format(python_string_literal(bucket_key_value)),
+            "        poke_interval={},".format(poke),
+            "        timeout={},".format(timeout),
+            "        deferrable={},".format("True" if deferrable else "False"),
+            "        aws_conn_id={},".format(python_string_literal(conn)),
+            "    )",
+        ]
+        sensor = "\n".join(sensor_lines)
+
+        deps = [
+            "_yard_wait_s3 >> {}".format(python_var_name(r)) for r in roots
+        ]
+
+        return {
+            "schedule_expr": "None",
+            "sensor_tasks": [sensor],
+            "sensor_deps": deps,
+            "extra_imports": [
+                "from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor"
+            ],
+            "max_active_runs": None,
+            "header_docstring": s3_header(
+                bucket, s3.get("key"), s3.get("prefix")
+            ),
+        }
+
+    if "sqs" in source:
+        sqs = source["sqs"]
+        queue_url = sqs["queue_url"]
+        wait = sqs.get("wait_time_seconds", 20)
+        max_msgs = sqs.get("max_messages", 5)
+        del_on_recv = sqs.get("delete_message_on_reception", True)
+        # SQS: DAG-level only (no per-trigger override), fall back to "aws_default"
+        conn = default_aws_conn_id or "aws_default"
+
+        sensor_lines = [
+            "    _yard_wait_sqs = SqsSensor(",
+            '        task_id="_yard_wait_sqs",',
+            "        sqs_queue={},".format(python_string_literal(queue_url)),
+            "        wait_time_seconds={},".format(wait),
+            "        max_messages={},".format(max_msgs),
+            "        delete_message_on_reception={},".format(
+                "True" if del_on_recv else "False"
+            ),
+            "        deferrable=True,",
+            "        aws_conn_id={},".format(python_string_literal(conn)),
+            "    )",
+        ]
+        sensor = "\n".join(sensor_lines)
+
+        deps = [
+            "_yard_wait_sqs >> {}".format(python_var_name(r)) for r in roots
+        ]
+
+        return {
+            "schedule_expr": "None",
+            "sensor_tasks": [sensor],
+            "sensor_deps": deps,
+            "extra_imports": [
+                "from airflow.providers.amazon.aws.sensors.sqs import SqsSensor"
+            ],
+            "max_active_runs": None,
+            "header_docstring": sqs_header(queue_url),
+        }
+
+    if "api" in source:
+        api = source["api"]
+        header = "# Trigger: API (manual / external invocation)\n"
+        desc = api.get("description")
+        if desc:
+            header += "# {}\n".format(desc)
+        header += "#\n"
+        header += (
+            "# This DAG is triggered manually via Airflow's REST API or CLI.\n"
+        )
+        header += (
+            "# yard does NOT manage Airflow REST auth — configure JWT, Basic,\n"
+        )
+        header += "# or IAM SigV4 credentials in your Airflow deployment.\n"
+        header += "#\n"
+        header += "# Invoke via REST:\n"
+        header += (
+            '#   curl -X POST "$AIRFLOW_URL/api/v1/dags/<dag_id>/dagRuns" \\\n'
+        )
+        header += '#        -u "$AIRFLOW_USER:$AIRFLOW_PASS" \\\n'
+        header += '#        -H "Content-Type: application/json" \\\n'
+        header += "#        -d '{\"conf\": {\"key\": \"value\"}}'\n"
+        header += "#\n"
+        header += "# Invoke via CLI:\n"
+        header += (
+            "#   airflow dags trigger <dag_id>"
+            " --conf '{\"key\": \"value\"}'\n"
+        )
+
+        payload_schema = api.get("payload_schema")
+        if isinstance(payload_schema, dict) and payload_schema:
+            header += "#\n"
+            header += (
+                "# Expected payload fields"
+                " (doc-only — no runtime enforcement in v1.6):\n"
+            )
+            for field in sorted(payload_schema.keys()):
+                header += "#   {}: {}\n".format(field, payload_schema[field])
+
+        return {
+            "schedule_expr": "None",
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [],
+            "max_active_runs": None,
+            "header_docstring": header,
+        }
+
+    # Unknown source type
+    return {
+        "schedule_expr": "None",
+        "sensor_tasks": [],
+        "sensor_deps": [],
+        "extra_imports": [],
+        "max_active_runs": None,
+        "header_docstring": "# Trigger: unknown source type\n",
+    }
+
+
+def _source_kind(item):
+    """Return the source kind key for sorting (D-07: alphabetical)."""
+    for key in ("api", "dataset", "s3", "schedule", "sqs"):
+        if key in item:
+            return key
+    return ""
+
+
+def render_composite_trigger(trigger, default_aws_conn_id, roots, version):
+    """Render a composite trigger (all/any) into codegen fragments.
+
+    DS-02/DS-03: homogeneous datasets produce alpha-sorted chain at schedule level.
+    DS-04/D-11: heterogeneous-all splits datasets to schedule, non-datasets to sensors.
+    D-10: _yard_join EmptyOperator only when 2+ sensor tasks.
+    """
+    vi = VERSION_IMPORTS[version]
+
+    if "all" in trigger:
+        items = trigger["all"]
+        separator = " & "
+    elif "any" in trigger:
+        items = trigger["any"]
+        separator = " | "
+    else:
+        return {
+            "schedule_expr": "None",
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [],
+            "max_active_runs": None,
+            "header_docstring": "",
+        }
+
+    # DS-02/DS-03: homogeneous datasets — alpha-sort URIs and join
+    all_datasets = all("dataset" in item for item in items)
+
+    if all_datasets:
+        uris = sorted(item["dataset"]["uri"] for item in items)
+        chain = separator.join(
+            "{}({})".format(vi["class_name"], python_string_literal(u))
+            for u in uris
+        )
+        header = "".join(dataset_header(u, version) for u in uris)
+        return {
+            "schedule_expr": "({})".format(chain),
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [vi["class_import"]],
+            "max_active_runs": None,
+            "header_docstring": header,
+        }
+
+    # DS-04 + D-11: heterogeneous-all
+    dataset_uris = sorted(
+        item["dataset"]["uri"] for item in items if "dataset" in item
+    )
+    non_datasets = [item for item in items if "dataset" not in item]
+
+    # Schedule expression: alpha-sorted chain for datasets
+    if not dataset_uris:
+        schedule_expr = "None"
+    elif len(dataset_uris) == 1:
+        schedule_expr = "[{}({})]".format(
+            vi["class_name"], python_string_literal(dataset_uris[0])
+        )
+    else:
+        chain = " & ".join(
+            "{}({})".format(vi["class_name"], python_string_literal(u))
+            for u in dataset_uris
+        )
+        schedule_expr = "({})".format(chain)
+
+    # D-07: sort non-dataset items alphabetically by source kind
+    non_datasets_sorted = sorted(non_datasets, key=_source_kind)
+
+    # Recurse into render_single_trigger for each non-dataset source.
+    # Pass empty roots — edges are wired explicitly below.
+    all_sensor_tasks = []
+    combined_imports = set()
+    if dataset_uris:
+        combined_imports.add(vi["class_import"])
+    combined_header = ""
+
+    for item in non_datasets_sorted:
+        r = render_single_trigger(item, default_aws_conn_id, [], version)
+        all_sensor_tasks.extend(r["sensor_tasks"])
+        combined_imports.update(r["extra_imports"])
+        if r["header_docstring"]:
+            combined_header += r["header_docstring"]
+
+    # D-10: _yard_join only when 2+ sensor tasks
+    sensor_deps = []
+    if len(all_sensor_tasks) >= 2:
+        join_lines = [
+            "    _yard_join = EmptyOperator(",
+            '        task_id="_yard_join",',
+            '        trigger_rule="all_success",',
+            "    )",
+        ]
+        all_sensor_tasks.append("\n".join(join_lines))
+        combined_imports.add(vi["empty_op_import"])
+
+        # Sensor -> _yard_join edges (alpha-sorted by emission order)
+        for item in non_datasets_sorted:
+            sensor_id = None
+            if "s3" in item:
+                sensor_id = "_yard_wait_s3"
+            elif "sqs" in item:
+                sensor_id = "_yard_wait_sqs"
+            if sensor_id:
+                sensor_deps.append("{} >> _yard_join".format(sensor_id))
+
+        # _yard_join -> root edges
+        for r in roots:
+            sensor_deps.append("_yard_join >> {}".format(python_var_name(r)))
+
+    elif len(all_sensor_tasks) == 1:
+        # Single sensor: connect directly to roots, no _yard_join
+        sensor_id = "_yard_wait_unknown"
+        for item in non_datasets_sorted:
+            if "s3" in item:
+                sensor_id = "_yard_wait_s3"
+                break
+            elif "sqs" in item:
+                sensor_id = "_yard_wait_sqs"
+                break
+        for r in roots:
+            sensor_deps.append(
+                "{} >> {}".format(sensor_id, python_var_name(r))
+            )
+
+    return {
+        "schedule_expr": schedule_expr,
+        "sensor_tasks": all_sensor_tasks,
+        "sensor_deps": sensor_deps,
+        "extra_imports": sorted(combined_imports),
+        "max_active_runs": None,
+        "header_docstring": combined_header,
+    }
+
+
+def render_trigger(trigger, schedule, default_aws_conn_id, roots, version):
+    """Render a trigger configuration into codegen fragments.
+
+    Single entry point for ALL schedule-expression resolution (D-03).
+    Normalizes single-element composites, dispatches to single/composite
+    renderers, applies CONC-01 max_active_runs default, and prepends
+    version banner for triggered DAGs.
+    """
+    # D-12: normalize single-element composites to bare-single
+    normalized = None
+    if trigger is not None:
+        if isinstance(trigger, dict):
+            if (
+                "all" in trigger
+                and isinstance(trigger["all"], list)
+                and len(trigger["all"]) == 1
+            ):
+                normalized = trigger["all"][0]
+            elif (
+                "any" in trigger
+                and isinstance(trigger["any"], list)
+                and len(trigger["any"]) == 1
+            ):
+                normalized = trigger["any"][0]
+            elif "all" not in trigger and "any" not in trigger:
+                # Already a single source
+                normalized = trigger
+
+    if normalized is not None:
+        result = render_single_trigger(
+            normalized, default_aws_conn_id, roots, version
+        )
+    elif trigger is not None:
+        result = render_composite_trigger(
+            trigger, default_aws_conn_id, roots, version
+        )
+    else:
+        # No trigger — use top-level schedule literal or None
+        result = {
+            "schedule_expr": (
+                python_string_literal(schedule) if schedule else "None"
+            ),
+            "sensor_tasks": [],
+            "sensor_deps": [],
+            "extra_imports": [],
+            "max_active_runs": None,
+            "header_docstring": "",
+        }
+
+    # CONC-01: default max_active_runs=1 for triggered DAGs
+    if trigger is not None and result["max_active_runs"] is None:
+        result["max_active_runs"] = 1
+
+    # D-12: prepend VERSION_BANNER for triggered DAGs only
+    if trigger is not None:
+        banner = VERSION_BANNERS[version]
+        if result["header_docstring"]:
+            result["header_docstring"] = banner + "\n" + result["header_docstring"]
+        else:
+            result["header_docstring"] = banner
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# DAG generation (ported from generation.rs)
+# ---------------------------------------------------------------------------
+
+
 def render_dag(job_name, job_config):
     """Main codegen entry point: render a complete Airflow DAG Python file.
 
-    For Plan 1, supports schedule-only DAGs. Trigger support is added in Plan 2.
+    Supports schedule-only DAGs, all 6 trigger types, and version-aware output.
     """
     # D-06: default airflow version is 3
     version = job_config.get("airflow_version", 3)
     vi = VERSION_IMPORTS[version]
 
     schedule = job_config.get("schedule")
+    trigger = job_config.get("trigger")
     tasks = job_config.get("tasks", [])
+
+    # Compute roots: task IDs with no depends_on entries (D-05)
+    all_task_ids = {t.get("task_id", "") for t in tasks}
+    roots = []
+    for task in tasks:
+        tid = task.get("task_id", "")
+        depends_on = task.get("depends_on", [])
+        if not depends_on:
+            roots.append(tid)
+
+    # Resolve default_aws_conn_id from config (D-12)
+    default_aws_conn_id = job_config.get("aws_conn_id")
+    if not default_aws_conn_id:
+        assume_role = job_config.get("assume_role")
+        if assume_role:
+            # Derive connection from role ARN (simplified for plugin)
+            default_aws_conn_id = "yard_" + sanitize_identifier(assume_role)
+        else:
+            default_aws_conn_id = None
+
+    # D-03: ALL schedule-expression resolution lives inside render_trigger
+    trender = render_trigger(
+        trigger, schedule, default_aws_conn_id, roots, version
+    )
+    schedule_expr = trender["schedule_expr"]
 
     # Determine which operator imports are needed
     needs_bash = False
     needs_glue = False
+    has_publishes = False
     for task in tasks:
         tt = task.get("task_type", "")
         if tt == "bash":
             needs_bash = True
         elif tt == "glue":
             needs_glue = True
+        if task.get("publishes"):
+            has_publishes = True
 
     import_lines = []
     if needs_bash:
@@ -238,48 +718,58 @@ def render_dag(job_name, job_config):
         import_lines.append(
             "from airflow.providers.amazon.aws.operators.glue import GlueJobOperator"
         )
-    imports_block = "\n".join(import_lines)
+    if has_publishes:
+        import_lines.append(vi["class_import"])
+
+    # Merge trigger-derived imports with task-derived imports (deduplicated, sorted)
+    combined_imports = sorted(
+        set(import_lines) | set(trender["extra_imports"])
+    )
+    imports_block = "\n".join(combined_imports)
 
     # Render default_args
     default_args = render_default_args(job_config)
 
-    # Schedule expression
-    if schedule is not None:
-        schedule_expr = python_string_literal(schedule)
-    else:
-        schedule_expr = "None"
-
-    # max_active_runs -- empty for schedule-only DAGs (plan 1)
-    max_active_runs = job_config.get("max_active_runs")
-    if max_active_runs is not None:
-        max_active_runs_block = "    max_active_runs={},\n".format(max_active_runs)
+    # CONC-01 + user-override-wins: user max_active_runs always wins over
+    # trigger auto-default. When both are None (schedule-only), emit nothing.
+    effective_max_active = job_config.get("max_active_runs")
+    if effective_max_active is None:
+        effective_max_active = trender["max_active_runs"]
+    if effective_max_active is not None:
+        max_active_runs_block = "    max_active_runs={},\n".format(
+            effective_max_active
+        )
     else:
         max_active_runs_block = ""
 
-    # Render tasks
-    task_lines = []
+    # Render tasks: prepend sensor tasks before user tasks
+    task_lines = list(trender["sensor_tasks"])
     for task in tasks:
         tid = task.get("task_id", "")
         task_lines.append(render_task(tid, task, version))
     tasks_block = "\n".join(task_lines)
 
-    # Dependency wiring
-    dep_lines = []
+    # Dependency wiring: prepend sensor deps before user deps
+    dep_lines = list(trender["sensor_deps"])
     for task in tasks:
         tid = task.get("task_id", "")
         depends_on = task.get("depends_on", [])
         for upstream in depends_on:
-            dep_lines.append("{} >> {}".format(python_var_name(upstream), python_var_name(tid)))
+            dep_lines.append(
+                "{} >> {}".format(
+                    python_var_name(upstream), python_var_name(tid)
+                )
+            )
 
     if dep_lines:
         deps_block = "\n".join(dep_lines)
     else:
         deps_block = "# No task dependencies"
 
-    # Trigger header block -- empty for schedule-only DAGs (Plan 1)
-    trigger_header_block = ""
+    # Trigger header block (version banner + per-source caveats)
+    trigger_header_block = trender["header_docstring"]
 
-    # Required connections block -- empty for Plan 1
+    # Required connections block -- empty for now (Plan 3)
     required_connections_block = ""
 
     # Render via Jinja2
@@ -337,6 +827,56 @@ def handle_validate(job_name, job_config):
             "message": "airflow_version must be 2 or 3",
             "severity": "error",
         })
+
+    # Rule: trigger structure validation (T-05-02)
+    trigger = job_config.get("trigger")
+    if trigger is not None and isinstance(trigger, dict):
+        recognized_keys = {"schedule", "dataset", "s3", "sqs", "api", "all", "any"}
+        trigger_keys = set(trigger.keys()) & recognized_keys
+        if not trigger_keys:
+            errors.append({
+                "field": "trigger",
+                "message": (
+                    "trigger must have one recognized key: "
+                    "schedule, dataset, s3, sqs, api, all, or any"
+                ),
+                "severity": "error",
+            })
+
+        # S3 trigger: bucket must be non-empty
+        if "s3" in trigger:
+            s3 = trigger["s3"]
+            if isinstance(s3, dict):
+                bucket = s3.get("bucket", "")
+                if not bucket:
+                    errors.append({
+                        "field": "trigger.s3.bucket",
+                        "message": "S3 trigger bucket must be non-empty",
+                        "severity": "error",
+                    })
+
+        # SQS trigger: queue_url must be non-empty
+        if "sqs" in trigger:
+            sqs = trigger["sqs"]
+            if isinstance(sqs, dict):
+                queue_url = sqs.get("queue_url", "")
+                if not queue_url:
+                    errors.append({
+                        "field": "trigger.sqs.queue_url",
+                        "message": "SQS trigger queue_url must be non-empty",
+                        "severity": "error",
+                    })
+
+        # Composite triggers: items must be a non-empty list
+        for comp_key in ("all", "any"):
+            if comp_key in trigger:
+                items = trigger[comp_key]
+                if not isinstance(items, list) or len(items) == 0:
+                    errors.append({
+                        "field": "trigger.{}".format(comp_key),
+                        "message": "composite trigger items must be a non-empty list",
+                        "severity": "error",
+                    })
 
     # Rule: connection_id syntax validation (D-11)
     tasks = job_config.get("tasks", [])
