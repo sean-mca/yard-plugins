@@ -898,19 +898,157 @@ def handle_codegen(job_name, job_config):
     return {"script": script}
 
 
+# ---------------------------------------------------------------------------
+# S3 helpers (ported from yard-plugin-common/src/aws/s3.rs -- S3ScriptOps)
+# boto3 is imported lazily inside each function so that validate, codegen,
+# and schema operations work in environments without boto3 installed.
+# ---------------------------------------------------------------------------
+
+
+def parse_s3_uri(uri):
+    """Parse ``s3://bucket/key`` into a ``(bucket, key)`` tuple.
+
+    Raises ``ValueError`` if *uri* does not start with ``s3://``.
+    """
+    if not uri.startswith("s3://"):
+        raise ValueError("not an S3 URI: {}".format(uri))
+    without_scheme = uri[len("s3://"):]
+    slash = without_scheme.find("/")
+    if slash < 0:
+        raise ValueError("S3 URI missing key component: {}".format(uri))
+    return without_scheme[:slash], without_scheme[slash + 1:]
+
+
+def upload_dag(bucket, dag_id, content, prefix=""):
+    """Upload DAG file content to S3 and return the ``s3://`` URI.
+
+    Key construction mirrors ``S3ScriptOps::script_key`` from
+    ``yard-plugin-common/src/aws/s3.rs``:
+    - empty prefix  -> ``{dag_id}.py``
+    - prefix ends ``/`` -> ``{prefix}{dag_id}.py``
+    - otherwise     -> ``{prefix}/{dag_id}.py``
+
+    T-05-01: *dag_id* is sanitized before use in the S3 key.
+    """
+    import boto3  # noqa: lazy import -- keep module-level free of boto3
+
+    safe_id = sanitize_identifier(dag_id)
+
+    if not prefix:
+        key = "{}.py".format(safe_id)
+    elif prefix.endswith("/"):
+        key = "{}{}.py".format(prefix, safe_id)
+    else:
+        key = "{}/{}.py".format(prefix, safe_id)
+
+    s3 = boto3.client("s3")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=content.encode("utf-8"),
+        ContentType="text/x-python",
+    )
+    return "s3://{}/{}".format(bucket, key)
+
+
+def delete_dag(bucket, key):
+    """Delete a DAG file from S3."""
+    import boto3  # noqa: lazy import
+
+    s3 = boto3.client("s3")
+    s3.delete_object(Bucket=bucket, Key=key)
+
+
+def dag_exists(bucket, key):
+    """Check whether a DAG file exists on S3 via ``HeadObject``.
+
+    Returns ``True`` if the object exists, ``False`` on a 404 response.
+    Re-raises any other ``ClientError``.
+    """
+    import boto3  # noqa: lazy import
+    from botocore.exceptions import ClientError
+
+    s3 = boto3.client("s3")
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "404":
+            return False
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Deploy / Destroy / Verify handlers
+# ---------------------------------------------------------------------------
+
+
 def handle_deploy(job_name, job_config, artifact):
-    """Deploy a DAG file to S3. Stub for Plan 3."""
-    raise NotImplementedError("deploy not yet implemented")
+    """Deploy a DAG file to S3 (D-10).
+
+    Uploads the generated DAG script to ``s3://{dags_bucket}/...`` and returns
+    a resource list containing the ``s3_object`` entry. Unlike the Glue plugin
+    there is no service resource to create -- the DAG file on S3 IS the
+    deployment.
+    """
+    dags_bucket = job_config.get("dags_bucket", "")
+    dags_prefix = job_config.get("dags_prefix", "")
+
+    log.info("uploading DAG %s to s3://%s/...", job_name, dags_bucket)
+
+    s3_uri = upload_dag(dags_bucket, job_name, artifact, dags_prefix)
+
+    return {
+        "resources": [
+            {"type": "s3_object", "id": s3_uri, "provider": "airflow"},
+        ],
+    }
 
 
 def handle_destroy(job_name, resources):
-    """Destroy a DAG file from S3. Stub for Plan 3."""
-    raise NotImplementedError("destroy not yet implemented")
+    """Destroy DAG file(s) from S3 (D-10).
+
+    Iterates the resource list and deletes each ``s3_object`` entry.
+    Unparseable URIs are logged as warnings and skipped (non-fatal, matching
+    the Glue plugin pattern from handler.rs).
+    """
+    for resource in resources:
+        if resource.get("type") != "s3_object":
+            continue
+        try:
+            bucket, key = parse_s3_uri(resource["id"])
+        except (ValueError, KeyError) as exc:
+            log.warning("skipping unparseable S3 resource: %s", exc)
+            continue
+        log.info("deleting DAG %s from s3://%s/%s", job_name, bucket, key)
+        delete_dag(bucket, key)
+
+    return {}
 
 
 def handle_verify(job_name, resources):
-    """Verify a DAG file exists on S3. Stub for Plan 3."""
-    raise NotImplementedError("verify not yet implemented")
+    """Verify DAG file existence on S3 via HeadObject (D-10).
+
+    For each ``s3_object`` resource, checks whether the S3 object exists.
+    Unknown resource types default to ``exists=True`` (matching reference
+    VerifyResponse pattern).
+    """
+    statuses = []
+    for resource in resources:
+        if resource.get("type") == "s3_object":
+            try:
+                bucket, key = parse_s3_uri(resource["id"])
+                exists = dag_exists(bucket, key)
+            except (ValueError, KeyError) as exc:
+                log.warning("skipping unparseable S3 resource: %s", exc)
+                exists = False
+            statuses.append({"resource": resource, "exists": exists})
+        else:
+            # Unknown resource types assumed to exist
+            statuses.append({"resource": resource, "exists": True})
+
+    return {"statuses": statuses}
 
 
 def handle_schema():
