@@ -908,6 +908,16 @@ def handle_validate(job_name, job_config):
                                     "message": "SQS trigger queue_url must be non-empty",
                                     "severity": "error",
                                 })
+                    # Reject duplicate non-dataset source types (would produce
+                    # duplicate Airflow task IDs that Airflow rejects at parse time)
+                    source_types = [_source_kind(item) for item in items if isinstance(item, dict)]
+                    non_dataset = [s for s in source_types if s and s != "dataset"]
+                    if len(non_dataset) != len(set(non_dataset)):
+                        errors.append({
+                            "field": "trigger.{}".format(comp_key),
+                            "message": "composite trigger cannot have duplicate non-dataset source types",
+                            "severity": "error",
+                        })
 
     # Rule: connection_id syntax validation (D-11)
     tasks = job_config.get("tasks", [])
