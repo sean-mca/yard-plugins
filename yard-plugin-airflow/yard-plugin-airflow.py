@@ -516,7 +516,7 @@ def render_composite_trigger(trigger, default_aws_conn_id, roots, version):
             vi["class_name"], python_string_literal(dataset_uris[0])
         )
     else:
-        chain = " & ".join(
+        chain = separator.join(
             "{}({})".format(vi["class_name"], python_string_literal(u))
             for u in dataset_uris
         )
