@@ -569,7 +569,7 @@ def render_composite_trigger(trigger, default_aws_conn_id, roots, version):
 
     elif len(all_sensor_tasks) == 1:
         # Single sensor: connect directly to roots, no _yard_join
-        sensor_id = "_yard_wait_unknown"
+        sensor_id = None
         for item in non_datasets_sorted:
             if "s3" in item:
                 sensor_id = "_yard_wait_s3"
@@ -577,6 +577,13 @@ def render_composite_trigger(trigger, default_aws_conn_id, roots, version):
             elif "sqs" in item:
                 sensor_id = "_yard_wait_sqs"
                 break
+        if sensor_id is None:
+            raise ValueError(
+                "composite trigger has 1 sensor task but could not determine "
+                "its task_id from source types: {}".format(
+                    [_source_kind(i) for i in non_datasets_sorted]
+                )
+            )
         for r in roots:
             sensor_deps.append(
                 "{} >> {}".format(sensor_id, python_var_name(r))
