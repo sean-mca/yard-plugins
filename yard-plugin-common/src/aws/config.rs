@@ -35,16 +35,22 @@ pub fn resolve_credential_params(
             .map(String::from)
     };
 
-    // Env vars beat config so CI can override (matches reference implementation)
+    // Env vars beat config so CI can override (matches reference implementation).
+    // Filter empty strings — `env::var().ok()` returns `Some("")` when a var
+    // is set but blank, which would bypass config fallback and send an empty
+    // ARN / external-id to the AWS API.
     let assume_role = std::env::var("YARD_AWS_ASSUME_ROLE")
         .ok()
+        .filter(|v| !v.is_empty())
         .or_else(|| cfg_str("assume_role"));
     let session_name = std::env::var("YARD_AWS_SESSION_NAME")
         .ok()
+        .filter(|v| !v.is_empty())
         .or_else(|| cfg_str("session_name"))
         .unwrap_or_else(|| "yard".to_string());
     let external_id = std::env::var("YARD_AWS_EXTERNAL_ID")
         .ok()
+        .filter(|v| !v.is_empty())
         .or_else(|| cfg_str("external_id"));
 
     (assume_role, session_name, external_id)
