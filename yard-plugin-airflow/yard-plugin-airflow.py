@@ -892,6 +892,15 @@ def handle_validate(job_name, job_config):
                     for idx, item in enumerate(items):
                         if not isinstance(item, dict):
                             continue
+                        if "schedule" in item:
+                            errors.append({
+                                "field": "trigger.{}.{}".format(comp_key, idx),
+                                "message": (
+                                    "schedule source is not supported inside composite triggers; "
+                                    "use a top-level schedule or trigger, not both"
+                                ),
+                                "severity": "error",
+                            })
                         if "s3" in item:
                             s3 = item["s3"]
                             if isinstance(s3, dict) and not s3.get("bucket", ""):
