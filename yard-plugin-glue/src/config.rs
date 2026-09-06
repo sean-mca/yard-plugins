@@ -117,3 +117,83 @@ pub(crate) fn build_default_arguments(config: &GlueConfig) -> HashMap<String, St
 
     args
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Deserialize a `GlueConfig` from a JSON value, applying serde defaults
+    /// for any fields not present in the input.
+    fn config_from_json(value: serde_json::Value) -> GlueConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn build_default_arguments_inserts_iceberg_when_absent() {
+        // Arrange: empty config — no default_arguments, no bookmark
+        let cfg = config_from_json(json!({}));
+
+        // Act
+        let args = build_default_arguments(&cfg);
+
+        // Assert: iceberg inserted as default datalake format
+        assert_eq!(
+            args.get("--datalake-formats"),
+            Some(&"iceberg".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_default_arguments_preserves_user_datalake_format() {
+        // Arrange: user explicitly sets datalake-formats to "delta"
+        let cfg = config_from_json(json!({
+            "default_arguments": {
+                "--datalake-formats": "delta"
+            }
+        }));
+
+        // Act
+        let args = build_default_arguments(&cfg);
+
+        // Assert: user value preserved, not overwritten with "iceberg"
+        assert_eq!(
+            args.get("--datalake-formats"),
+            Some(&"delta".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_default_arguments_bookmark_enabled() {
+        // Arrange: bookmark set to "enabled"
+        let cfg = config_from_json(json!({
+            "bookmark": "enabled"
+        }));
+
+        // Act
+        let args = build_default_arguments(&cfg);
+
+        // Assert: bookmark wired to Glue job argument
+        assert_eq!(
+            args.get("--job-bookmark-option"),
+            Some(&"job-bookmark-enable".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_default_arguments_bookmark_disabled() {
+        // Arrange: bookmark set to "disabled"
+        let cfg = config_from_json(json!({
+            "bookmark": "disabled"
+        }));
+
+        // Act
+        let args = build_default_arguments(&cfg);
+
+        // Assert: bookmark wired to Glue job argument
+        assert_eq!(
+            args.get("--job-bookmark-option"),
+            Some(&"job-bookmark-disable".to_string()),
+        );
+    }
+}
