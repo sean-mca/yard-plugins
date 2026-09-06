@@ -97,32 +97,108 @@ pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::Sd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[tokio::test]
-    async fn aws_config_returns_sdk_config_with_region() {
-        // Ensure no env vars interfere with this test
+    /// Mutex to serialize tests that read/write YARD_AWS_* env vars.
+    /// Env vars are process-global; concurrent tests race without this.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Clear all YARD_AWS_* env vars used by credential resolution.
+    fn clear_yard_env() {
         std::env::remove_var("YARD_AWS_ASSUME_ROLE");
         std::env::remove_var("YARD_AWS_SESSION_NAME");
         std::env::remove_var("YARD_AWS_EXTERNAL_ID");
+    }
 
-        let cfg = aws_config(
-            "us-east-1",
-            None,
-        )
-        .await;
+    #[tokio::test]
+    async fn aws_config_returns_sdk_config_with_region() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
 
-        // Verify region is set correctly
+        let cfg = aws_config("us-east-1", None).await;
+
         let region = cfg.region().expect("region should be set");
         assert_eq!(region.as_ref(), "us-east-1");
     }
 
     #[tokio::test]
     async fn aws_config_with_custom_region() {
-        std::env::remove_var("YARD_AWS_ASSUME_ROLE");
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
 
         let cfg = aws_config("eu-west-1", None).await;
 
         let region = cfg.region().expect("region should be set");
         assert_eq!(region.as_ref(), "eu-west-1");
+    }
+
+    #[test]
+    fn resolve_params_env_wins_over_config() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
+
+        std::env::set_var("YARD_AWS_ASSUME_ROLE", "arn:aws:iam::111:role/EnvRole");
+        std::env::set_var("YARD_AWS_SESSION_NAME", "env-session");
+        std::env::set_var("YARD_AWS_EXTERNAL_ID", "env-ext-id");
+
+        let cfg = serde_json::json!({
+            "assume_role": "arn:aws:iam::222:role/ConfigRole",
+            "session_name": "config-session",
+            "external_id": "config-ext-id"
+        });
+
+        let (role, session, ext_id) = resolve_credential_params(Some(&cfg));
+
+        assert_eq!(role.as_deref(), Some("arn:aws:iam::111:role/EnvRole"));
+        assert_eq!(session, "env-session");
+        assert_eq!(ext_id.as_deref(), Some("env-ext-id"));
+
+        clear_yard_env();
+    }
+
+    #[test]
+    fn resolve_params_config_fallback() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
+
+        let cfg = serde_json::json!({
+            "assume_role": "arn:aws:iam::222:role/ConfigRole",
+            "session_name": "config-session",
+            "external_id": "config-ext-id"
+        });
+
+        let (role, session, ext_id) = resolve_credential_params(Some(&cfg));
+
+        assert_eq!(role.as_deref(), Some("arn:aws:iam::222:role/ConfigRole"));
+        assert_eq!(session, "config-session");
+        assert_eq!(ext_id.as_deref(), Some("config-ext-id"));
+    }
+
+    #[test]
+    fn resolve_params_env_only() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
+
+        std::env::set_var("YARD_AWS_ASSUME_ROLE", "arn:aws:iam::111:role/EnvRole");
+
+        let (role, session, ext_id) = resolve_credential_params(None);
+
+        assert_eq!(role.as_deref(), Some("arn:aws:iam::111:role/EnvRole"));
+        assert_eq!(session, "yard");
+        assert!(ext_id.is_none());
+
+        clear_yard_env();
+    }
+
+    #[test]
+    fn resolve_params_defaults_when_neither_set() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        clear_yard_env();
+
+        let (role, session, ext_id) = resolve_credential_params(None);
+
+        assert!(role.is_none());
+        assert_eq!(session, "yard");
+        assert!(ext_id.is_none());
     }
 }
