@@ -939,6 +939,28 @@ def handle_validate(job_name, job_config):
                 "severity": "error",
             })
 
+    # Rule: task_type must be supported and depends_on must reference known tasks
+    all_task_ids = {t.get("task_id", "") for t in tasks}
+    supported_types = {"bash", "glue"}
+    for task in tasks:
+        tid = task.get("task_id", "")
+        task_type = task.get("task_type", "")
+        if task_type and task_type not in supported_types:
+            errors.append({
+                "field": "tasks.{}.task_type".format(tid),
+                "message": "unsupported task_type '{}' (must be one of: {})".format(
+                    task_type, ", ".join(sorted(supported_types))
+                ),
+                "severity": "error",
+            })
+        for dep in task.get("depends_on", []):
+            if dep not in all_task_ids:
+                errors.append({
+                    "field": "tasks.{}.depends_on".format(tid),
+                    "message": "depends_on references unknown task '{}'".format(dep),
+                    "severity": "error",
+                })
+
     return {"errors": errors}
 
 
