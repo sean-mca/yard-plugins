@@ -1,6 +1,6 @@
 //! Glue plugin handler implementing the `PluginHandler` trait.
 //!
-//! Implements validate (10 rules), codegen (via `generate_pyspark`),
+//! Implements validate (12 rules), codegen (via `generate_pyspark`),
 //! deploy (S3 upload + Glue create-or-update upsert per D-08), destroy
 //! (Glue delete + non-fatal S3 cleanup per D-09), verify (resource
 //! existence checks per AWS-06), and schema (12 fields + source/sink
@@ -247,10 +247,18 @@ impl PluginHandler for GlueHandler {
 
     fn validate(
         &self,
-        _job_name: &str,
+        job_name: &str,
         job_config: &serde_json::Value,
     ) -> Result<ValidateResponse> {
         let mut errors = Vec::new();
+
+        // Job name length check (AWS CreateJob limit: 255 chars)
+        if job_name.len() > 255 {
+            errors.push(validation_error(
+                "job_name",
+                "job name exceeds AWS limit of 255 characters",
+            ));
+        }
 
         // Rule 1: role required at top level (non-empty string)
         let has_role = job_config
@@ -314,12 +322,12 @@ impl PluginHandler for GlueHandler {
                 }
             }
 
-            // Rule 6: timeout >= 1 (only if present)
+            // Rule 6: timeout must be 1-10080 minutes (only if present)
             if let Some(t) = inner.get("timeout").and_then(|v| v.as_i64()) {
-                if t < 1 {
+                if !(1..=10080).contains(&t) {
                     errors.push(validation_error(
                         "glue.timeout",
-                        "must be at least 1 (minutes)",
+                        "must be between 1 and 10080 minutes (7 days)",
                     ));
                 }
             }
