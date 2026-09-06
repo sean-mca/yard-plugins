@@ -26,6 +26,22 @@ Each plugin binary is spawned as a child process by the yard host:
 
 **stdout is the protocol channel.** All logging goes to stderr via `tracing` (re-exported by the SDK). Never use `println!` — it corrupts the protocol stream.
 
+## Region Handling
+
+Region resolution differs between deploy and destroy/verify due to the `PluginHandler` trait signature:
+
+| Operation | Region source | Credential source | Why |
+|-----------|--------------|-------------------|-----|
+| `deploy` | `job_config` JSON (`glue.region`) | `job_config` JSON + env vars | `deploy(job_name, job_config, artifact)` receives the full config |
+| `destroy` | `AWS_DEFAULT_REGION` env var (fallback: `us-east-1`) | Env vars only (`YARD_AWS_ASSUME_ROLE`, `YARD_AWS_SESSION_NAME`, `YARD_AWS_EXTERNAL_ID`) | `destroy(job_name, resources)` has no config |
+| `verify` | `AWS_DEFAULT_REGION` env var (fallback: `us-east-1`) | Env vars only (same as destroy) | `verify(job_name, resources)` has no config |
+
+**Host responsibility:** Before spawning a plugin for `destroy` or `verify`, the yard host **must** set `AWS_DEFAULT_REGION` to the region used during the original deploy (available in the job state file). If the host does not set it, the plugin falls back to `us-east-1`, which may target the wrong region and fail silently or destroy resources in the wrong account.
+
+**AssumeRole in destroy/verify:** Because destroy and verify pass `None` for the `aws_cfg` parameter, AssumeRole credentials come exclusively from the `YARD_AWS_ASSUME_ROLE`, `YARD_AWS_SESSION_NAME`, and `YARD_AWS_EXTERNAL_ID` environment variables — not from config JSON. The host must set these env vars if cross-account access is needed.
+
+This is a structural consequence of the spawn-per-operation plugin model. The reference implementation (`yard-core`) used a long-lived `GlueProvider` struct that stored the client at construction time, so all operations shared the same region. In the plugin model, each invocation is independent and must resolve region from the environment.
+
 ## Reference Implementation
 
 The Glue and EMR provider logic previously lived in `yard-core` and was removed in yard v2.0 (Phase 70). The deleted code is the implementation reference:
