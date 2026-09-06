@@ -641,3 +641,309 @@ impl PluginHandler for GlueHandler {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Build a minimal valid job config that passes all validation rules.
+    fn valid_config() -> serde_json::Value {
+        json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket"
+            }
+        })
+    }
+
+    // ── Validation rule tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_valid_config_no_errors() {
+        let handler = GlueHandler::new();
+        let config = valid_config();
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert!(response.errors.is_empty(), "expected no errors, got: {:?}", response.errors);
+    }
+
+    #[test]
+    fn validate_rejects_long_job_name() {
+        let handler = GlueHandler::new();
+        let config = valid_config();
+        let long_name = "a".repeat(256);
+
+        let response = handler.validate(&long_name, &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "job_name");
+    }
+
+    #[test]
+    fn validate_rejects_missing_role() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "glue": { "script_bucket": "my-bucket" }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "role");
+    }
+
+    #[test]
+    fn validate_rejects_missing_script_bucket() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {}
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.script_bucket");
+    }
+
+    #[test]
+    fn validate_rejects_missing_glue_block() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole"
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.script_bucket");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_worker_type() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "worker_type": "INVALID"
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.worker_type");
+    }
+
+    #[test]
+    fn validate_rejects_workers_below_one() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "number_of_workers": 0
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.number_of_workers");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_glue_version() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "glue_version": "2.0"
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.glue_version");
+    }
+
+    #[test]
+    fn validate_rejects_timeout_below_one() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "timeout": 0
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.timeout");
+    }
+
+    #[test]
+    fn validate_rejects_timeout_above_limit() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "timeout": 10081
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.timeout");
+    }
+
+    #[test]
+    fn validate_rejects_negative_max_retries() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "max_retries": -1
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.max_retries");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_bookmark() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "bookmark": "maybe"
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.bookmark");
+    }
+
+    #[test]
+    fn validate_rejects_connections_not_array() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "connections": "not-an-array"
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.connections");
+    }
+
+    #[test]
+    fn validate_rejects_default_arguments_not_object() {
+        let handler = GlueHandler::new();
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole",
+            "glue": {
+                "script_bucket": "my-bucket",
+                "default_arguments": "not-an-object"
+            }
+        });
+
+        let response = handler.validate("test-job", &config).unwrap();
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].field, "glue.default_arguments");
+    }
+
+    // ── parse_s3_uri tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_s3_uri_valid_simple() {
+        assert_eq!(parse_s3_uri("s3://bucket/key"), Some(("bucket", "key")));
+    }
+
+    #[test]
+    fn parse_s3_uri_valid_nested_key() {
+        assert_eq!(
+            parse_s3_uri("s3://bucket/path/to/key"),
+            Some(("bucket", "path/to/key"))
+        );
+    }
+
+    #[test]
+    fn parse_s3_uri_missing_prefix() {
+        assert_eq!(parse_s3_uri("bucket/key"), None);
+    }
+
+    #[test]
+    fn parse_s3_uri_empty_bucket() {
+        assert_eq!(parse_s3_uri("s3:///key"), None);
+    }
+
+    #[test]
+    fn parse_s3_uri_empty_key() {
+        assert_eq!(parse_s3_uri("s3://bucket/"), None);
+    }
+
+    #[test]
+    fn parse_s3_uri_no_key() {
+        assert_eq!(parse_s3_uri("s3://bucket"), None);
+    }
+
+    // ── extract_glue_config tests ──────────────────────────────────
+
+    #[test]
+    fn extract_glue_config_valid() {
+        let config = json!({
+            "glue": {
+                "script_bucket": "my-bucket",
+                "worker_type": "G.1X"
+            }
+        });
+
+        let result = extract_glue_config(&config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extract_glue_config_missing_block() {
+        let config = json!({
+            "role": "arn:aws:iam::123456789012:role/GlueRole"
+        });
+
+        let result = extract_glue_config(&config);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_glue_config_malformed() {
+        let config = json!({
+            "glue": "not_an_object"
+        });
+
+        let result = extract_glue_config(&config);
+
+        assert!(result.is_err());
+    }
+}
