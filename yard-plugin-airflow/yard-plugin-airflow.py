@@ -91,13 +91,13 @@ def dataset_header(uri, version):
 def s3_header(bucket, key=None, prefix=None):
     """D-13: S3 backfill caveat header."""
     if key:
-        target = "key={}".format(key)
+        target = ", key={}".format(key)
     elif prefix:
-        target = "prefix={}".format(prefix)
+        target = ", prefix={}".format(prefix)
     else:
         target = ""
     return (
-        "# Trigger: S3 (bucket={bucket}, {target})\n"
+        "# Trigger: S3 (bucket={bucket}{target})\n"
         "#\n"
         "# Backfill caveat: deferrable sensor re-pokes against current S3 state —\n"
         "# original landed object is not replayable from event history.\n"
