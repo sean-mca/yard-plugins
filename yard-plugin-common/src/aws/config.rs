@@ -5,14 +5,14 @@
 //!
 //! ## Credential Precedence (D-06)
 //!
-//! AssumeRole parameters are resolved with request JSON taking highest
-//! priority, then environment variables:
+//! AssumeRole parameters are resolved with environment variables taking
+//! highest priority, then request JSON — so CI can override static config:
 //!
-//! | Parameter      | 1st (request JSON)              | 2nd (env var)               |
+//! | Parameter      | 1st (env var)                   | 2nd (request JSON)          |
 //! |----------------|---------------------------------|-----------------------------|
-//! | `assume_role`  | `aws_cfg["assume_role"]`        | `YARD_AWS_ASSUME_ROLE`      |
-//! | `session_name` | `aws_cfg["session_name"]`       | `YARD_AWS_SESSION_NAME`     |
-//! | `external_id`  | `aws_cfg["external_id"]`        | `YARD_AWS_EXTERNAL_ID`      |
+//! | `assume_role`  | `YARD_AWS_ASSUME_ROLE`          | `aws_cfg["assume_role"]`    |
+//! | `session_name` | `YARD_AWS_SESSION_NAME`         | `aws_cfg["session_name"]`   |
+//! | `external_id`  | `YARD_AWS_EXTERNAL_ID`          | `aws_cfg["external_id"]`    |
 //!
 //! When no role ARN is found, falls through to the default provider chain
 //! (env vars, shared config, IMDS/ECS task role, SSO).
@@ -20,24 +20,14 @@
 use aws_config::BehaviorVersion;
 use serde_json::Value;
 
-/// Build a standard AWS SDK config with region, retry policy, and optional
-/// STS `AssumeRole` wrapped around the default credential provider chain.
+/// Resolve AssumeRole credential parameters with env > config precedence.
 ///
-/// # Credential precedence (D-06)
-///
-/// Resolution of AssumeRole params:
-///   1. Request JSON (`aws_cfg["assume_role"]`) — per-job isolation
-///   2. `YARD_AWS_ASSUME_ROLE` env var — CI override
-///   3. Default provider chain (no AssumeRole)
-///
-/// Session name and external ID follow the same two-tier pattern
-/// (request JSON, then env var).
-pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::SdkConfig {
-    let region_obj = aws_config::Region::new(region.to_string());
-    let base = aws_config::defaults(BehaviorVersion::latest())
-        .region(region_obj.clone())
-        .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
-
+/// Returns `(assume_role, session_name, external_id)`. Environment variables
+/// beat request JSON so CI pipelines can override static repo config
+/// (matches the reference implementation).
+pub fn resolve_credential_params(
+    aws_cfg: Option<&Value>,
+) -> (Option<String>, String, Option<String>) {
     let cfg_str = |key: &str| {
         aws_cfg
             .and_then(|v| v.get(key))
@@ -45,16 +35,50 @@ pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::Sd
             .map(String::from)
     };
 
-    // D-06 precedence: request JSON > env var > default chain
-    let assume_role = cfg_str("assume_role")
-        .or_else(|| std::env::var("YARD_AWS_ASSUME_ROLE").ok());
+    // Env vars beat config so CI can override (matches reference implementation)
+    let assume_role = std::env::var("YARD_AWS_ASSUME_ROLE")
+        .ok()
+        .or_else(|| cfg_str("assume_role"));
+    let session_name = std::env::var("YARD_AWS_SESSION_NAME")
+        .ok()
+        .or_else(|| cfg_str("session_name"))
+        .unwrap_or_else(|| "yard".to_string());
+    let external_id = std::env::var("YARD_AWS_EXTERNAL_ID")
+        .ok()
+        .or_else(|| cfg_str("external_id"));
+
+    (assume_role, session_name, external_id)
+}
+
+/// Build a standard AWS SDK config with region, retry policy, and optional
+/// STS `AssumeRole` wrapped around the default credential provider chain.
+///
+/// # Credential precedence (D-06)
+///
+/// Resolution of AssumeRole params:
+///   1. `YARD_AWS_ASSUME_ROLE` env var — CI override
+///   2. Request JSON (`aws_cfg["assume_role"]`) — per-job config
+///   3. Default provider chain (no AssumeRole)
+///
+/// Session name and external ID follow the same env-first pattern.
+pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::SdkConfig {
+    let region_obj = aws_config::Region::new(region.to_string());
+    tracing::info!(region = %region, "AWS region resolved");
+
+    let base = aws_config::defaults(BehaviorVersion::latest())
+        .region(region_obj.clone())
+        .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
+
+    // D-06 precedence: env var > config > default chain
+    let (assume_role, session_name, external_id) = resolve_credential_params(aws_cfg);
 
     if let Some(role_arn) = assume_role {
-        let session_name = cfg_str("session_name")
-            .or_else(|| std::env::var("YARD_AWS_SESSION_NAME").ok())
-            .unwrap_or_else(|| "yard".to_string());
-        let external_id = cfg_str("external_id")
-            .or_else(|| std::env::var("YARD_AWS_EXTERNAL_ID").ok());
+        tracing::info!(
+            role_arn = %role_arn,
+            session_name = %session_name,
+            has_external_id = external_id.is_some(),
+            "Using STS AssumeRole"
+        );
 
         let mut builder = aws_config::sts::AssumeRoleProvider::builder(role_arn)
             .session_name(session_name)
@@ -66,6 +90,7 @@ pub async fn aws_config(region: &str, aws_cfg: Option<&Value>) -> aws_config::Sd
         return base.credentials_provider(provider).load().await;
     }
 
+    tracing::info!("Using default credential provider chain");
     base.load().await
 }
 

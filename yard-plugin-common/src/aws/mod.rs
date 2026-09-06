@@ -7,5 +7,5 @@
 pub mod config;
 pub mod s3;
 
-pub use config::aws_config;
+pub use config::{aws_config, resolve_credential_params};
 pub use s3::{S3Client, S3ScriptOps};
