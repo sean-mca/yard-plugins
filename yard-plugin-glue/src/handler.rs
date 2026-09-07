@@ -215,10 +215,16 @@ async fn glue_job_exists(client: &aws_sdk_glue::Client, job_name: &str) -> Resul
 /// Holds an embedded tokio runtime for bridging sync trait methods to
 /// async AWS SDK calls.
 pub(crate) struct GlueHandler {
-    /// Tokio runtime -- kept alive so the handle remains valid.
-    _rt: tokio::runtime::Runtime,
-    /// Handle for `block_on` bridging in handler methods.
-    rt: tokio::runtime::Handle,
+    /// Owned tokio runtime used to bridge the sync trait methods to the
+    /// async AWS SDK.
+    ///
+    /// This field must hold the owned runtime, never a cloned executor
+    /// reference. A `current_thread` runtime only drives its I/O and
+    /// timer drivers from the owned runtime's `block_on`; bridging
+    /// through a clone parks on the future without ever running the
+    /// reactor, so every AWS request is signed, dispatched, and then
+    /// left permanently pending until the caller times out.
+    rt: tokio::runtime::Runtime,
 }
 
 impl GlueHandler {
@@ -228,11 +234,7 @@ impl GlueHandler {
             .enable_all()
             .build()
             .expect("BUG: failed to create tokio runtime");
-        let handle = runtime.handle().clone();
-        Self {
-            _rt: runtime,
-            rt: handle,
-        }
+        Self { rt: runtime }
     }
 }
 
