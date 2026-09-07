@@ -1,0 +1,44 @@
+# yard-plugins -- local ministack AWS emulator for integration testing (Phase 8).
+#
+# LOCAL TESTING ONLY. This file is never used in production and ships no
+# production configuration. It exists so the ministack emulator that backs the
+# Glue lifecycle tests is one `make ministack-up` away, keeping container
+# lifecycle entirely outside the Rust test code.
+#
+# WHY THE PORT BINDING IS LOOPBACK-SCOPED
+#   ministack is an unauthenticated AWS emulator: anything that can reach its
+#   gateway port has full read/write control of every emulated bucket and Glue
+#   job. The host side of the port mapping is therefore pinned to the loopback
+#   interface. Never republish it on all interfaces (a bare `4566:4566`), which
+#   would expose the emulator to the whole LAN.
+#
+# WHY THE IMAGE TAG IS PINNED
+#   A container image tag is a mutable pointer, and whatever it resolves to
+#   executes locally. The tag below is the exact build every INTG scenario was
+#   verified against. The floating `latest` tag has since moved to a newer,
+#   unverified build, so a `docker compose pull` against it could silently swap
+#   the emulator under the tests.
+#
+# PORT CONFLICT FALLBACK
+#   If a ministack container started outside this repo is already listening on
+#   port 4566, `docker compose up` will fail to bind. That is not a problem:
+#   skip `make ministack-up` entirely and point the opt-in test variable at the
+#   container you already have, e.g.
+#       YARD_TEST_AWS_ENDPOINT=http://127.0.0.1:4566 make test-integration
+#   The tests only need a reachable ministack gateway; they do not care which
+#   container serves it.
+#
+# There is deliberately no `healthcheck:` here -- readiness is polled from the
+# host in the Makefile's `ministack-up` recipe, because the presence of `curl`
+# inside the image is unverified.
+
+services:
+  ministack:
+    image: ministackorg/ministack:1.4.8
+    container_name: yard-plugins-ministack
+    ports:
+      # Host side bound to the loopback interface only. See the header block.
+      - "127.0.0.1:4566:4566"
+    environment:
+      - GATEWAY_PORT=4566
+      - LOG_LEVEL=INFO
