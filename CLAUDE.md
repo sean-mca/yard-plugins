@@ -54,6 +54,23 @@ The Glue and EMR provider logic previously lived in `yard-core` and was removed 
 
 To view this code: `cd ../yard && git show 1cfa880^:yard-core/src/providers/glue.rs`
 
+## Running Integration Tests
+
+The Glue plugin's lifecycle tests run against **ministack**, a local MIT-licensed AWS emulator listening on port 4566. No AWS account and no credentials are needed.
+
+| Command | What it does |
+|---------|--------------|
+| `make ministack-up` | Starts the pinned ministack container and waits for the gateway to answer |
+| `make ministack-down` | Stops and removes the container and its volumes |
+| `make test-integration` | Exports `YARD_TEST_AWS_ENDPOINT=http://127.0.0.1:4566` and runs the Glue suite |
+| `make test` | The offline suite (`cargo test --workspace`). Needs no Docker and must stay green at all times |
+
+**A skipped test is not a passing test.** When `YARD_TEST_AWS_ENDPOINT` is unset the lifecycle tests return early and write a skip note to stderr, so the offline suite stays green on a machine with no emulator. Any genuine check of the INTG requirements needs the gated run.
+
+`make ministack-up` is optional — point `YARD_TEST_AWS_ENDPOINT` at any already-running ministack instead, which is the way around a port-4566 conflict with a container started outside this repo.
+
+Write the endpoint as the IP literal `127.0.0.1`, not `localhost`: an IP-literal endpoint makes the S3 client select path-style addressing, which is portable across all four target platforms.
+
 ## Rules
 
 - **All Rust code MUST adhere to every rule in `../yard/rules/`.** This applies to all agents and sub-agents — no exceptions.
