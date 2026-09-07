@@ -116,23 +116,41 @@ mod tests {
         std::env::remove_var("YARD_AWS_EXTERNAL_ID");
     }
 
-    #[tokio::test]
-    async fn aws_config_returns_sdk_config_with_region() {
+    /// Drive an async body to completion on a fresh current-thread runtime.
+    ///
+    /// The two `aws_config` tests below are deliberately plain `#[test]` fns
+    /// rather than `#[tokio::test]` (a departure from the `test-tokio-async`
+    /// rule). `ENV_LOCK` must stay held for the whole SDK load — the provider
+    /// chain reads process-global env vars while it resolves — but a
+    /// `std::sync::MutexGuard` may not be held across an `.await`
+    /// (`anti-lock-across-await`). Driving the future synchronously under the
+    /// guard keeps the lock's coverage intact with no await point in the test
+    /// body.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build")
+            .block_on(future)
+    }
+
+    #[test]
+    fn aws_config_returns_sdk_config_with_region() {
         let _lock = ENV_LOCK.lock().expect("env lock poisoned");
         clear_yard_env();
 
-        let cfg = aws_config("us-east-1", None).await;
+        let cfg = block_on(aws_config("us-east-1", None));
 
         let region = cfg.region().expect("region should be set");
         assert_eq!(region.as_ref(), "us-east-1");
     }
 
-    #[tokio::test]
-    async fn aws_config_with_custom_region() {
+    #[test]
+    fn aws_config_with_custom_region() {
         let _lock = ENV_LOCK.lock().expect("env lock poisoned");
         clear_yard_env();
 
-        let cfg = aws_config("eu-west-1", None).await;
+        let cfg = block_on(aws_config("eu-west-1", None));
 
         let region = cfg.region().expect("region should be set");
         assert_eq!(region.as_ref(), "eu-west-1");
