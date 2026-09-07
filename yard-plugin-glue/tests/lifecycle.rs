@@ -175,3 +175,194 @@ async fn deploy_updates_existing_glue_job() {
         "the stored script should be the second artifact verbatim"
     );
 }
+
+// Variant A. An absent `script_prefix` does NOT yield a bare `<job>.py` key:
+// `GlueConfig::script_prefix` carries a serde default of `yard-scripts/`, so
+// that default is what lands in S3. Do not "correct" this expectation.
+#[tokio::test]
+async fn deploy_uses_default_script_prefix() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("pfx-default");
+    let bucket = common::unique_name("pfx-default-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let expected_key = format!("yard-scripts/{job}.py");
+    fixture.track_key(&expected_key);
+
+    let run = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket
+                }
+            },
+            "artifact": "print('default prefix')"
+        }),
+    );
+
+    assert_eq!(run.exit_code, 0, "deploy failed; stderr: {}", run.stderr);
+    let script_resource = run.response["resources"][0].clone();
+    assert_eq!(script_resource["id"], format!("s3://{bucket}/{expected_key}"));
+
+    clients
+        .s3
+        .head_object()
+        .bucket(&bucket)
+        .key(&expected_key)
+        .send()
+        .await
+        .expect("the script should exist at the default-prefixed key");
+
+    let verify = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "verify",
+            "job_name": job,
+            "resources": [script_resource]
+        }),
+    );
+
+    assert_eq!(verify.exit_code, 0, "verify failed; stderr: {}", verify.stderr);
+    let statuses = verify.response["statuses"]
+        .as_array()
+        .expect("verify response should carry a statuses array");
+    assert_eq!(statuses.len(), 1, "expected one status; got {statuses:?}");
+    assert_eq!(
+        statuses[0]["exists"], true,
+        "verify should report the uploaded script as present"
+    );
+}
+
+#[tokio::test]
+async fn deploy_honors_explicit_script_prefix() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("pfx-explicit");
+    let bucket = common::unique_name("pfx-explicit-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let expected_key = format!("scripts/{job}.py");
+    fixture.track_key(&expected_key);
+
+    let run = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('explicit prefix')"
+        }),
+    );
+
+    assert_eq!(run.exit_code, 0, "deploy failed; stderr: {}", run.stderr);
+    let script_resource = run.response["resources"][0].clone();
+    assert_eq!(script_resource["id"], format!("s3://{bucket}/{expected_key}"));
+
+    clients
+        .s3
+        .head_object()
+        .bucket(&bucket)
+        .key(&expected_key)
+        .send()
+        .await
+        .expect("the script should exist under the explicit prefix");
+
+    let verify = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "verify",
+            "job_name": job,
+            "resources": [script_resource]
+        }),
+    );
+
+    assert_eq!(verify.exit_code, 0, "verify failed; stderr: {}", verify.stderr);
+    let statuses = verify.response["statuses"]
+        .as_array()
+        .expect("verify response should carry a statuses array");
+    assert_eq!(statuses.len(), 1, "expected one status; got {statuses:?}");
+    assert_eq!(
+        statuses[0]["exists"], true,
+        "verify should report the uploaded script as present"
+    );
+}
+
+#[tokio::test]
+async fn deploy_with_empty_prefix_writes_to_bucket_root() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("pfx-empty");
+    let bucket = common::unique_name("pfx-empty-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let expected_key = format!("{job}.py");
+    fixture.track_key(&expected_key);
+
+    let run = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": ""
+                }
+            },
+            "artifact": "print('empty prefix')"
+        }),
+    );
+
+    assert_eq!(run.exit_code, 0, "deploy failed; stderr: {}", run.stderr);
+    let script_resource = run.response["resources"][0].clone();
+    assert_eq!(script_resource["id"], format!("s3://{bucket}/{expected_key}"));
+
+    clients
+        .s3
+        .head_object()
+        .bucket(&bucket)
+        .key(&expected_key)
+        .send()
+        .await
+        .expect("the script should exist at the bucket root");
+
+    let verify = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "verify",
+            "job_name": job,
+            "resources": [script_resource]
+        }),
+    );
+
+    assert_eq!(verify.exit_code, 0, "verify failed; stderr: {}", verify.stderr);
+    let statuses = verify.response["statuses"]
+        .as_array()
+        .expect("verify response should carry a statuses array");
+    assert_eq!(statuses.len(), 1, "expected one status; got {statuses:?}");
+    assert_eq!(
+        statuses[0]["exists"], true,
+        "verify should report the uploaded script as present"
+    );
+}
