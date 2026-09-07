@@ -149,7 +149,17 @@ fn deploy_processes_request_without_crash() {
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        // Dummy credentials plus an unroutable endpoint keep this test
+        // fully offline. The runtime bridge now completes AWS I/O, so
+        // without these the spawned binary would reach whatever account
+        // the developer's ambient credentials resolve to. Port 1 has no
+        // listener, so the connection is refused immediately.
         .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .env("AWS_ENDPOINT_URL", "http://127.0.0.1:1")
+        .env("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+        .env("AWS_CONFIG_FILE", "/dev/null")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
@@ -200,7 +210,17 @@ fn destroy_processes_request_without_crash() {
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        // Dummy credentials plus an unroutable endpoint keep this test
+        // fully offline. The runtime bridge now completes AWS I/O, so
+        // without these the spawned binary would reach whatever account
+        // the developer's ambient credentials resolve to. Port 1 has no
+        // listener, so the connection is refused immediately.
         .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .env("AWS_ENDPOINT_URL", "http://127.0.0.1:1")
+        .env("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+        .env("AWS_CONFIG_FILE", "/dev/null")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
@@ -254,7 +274,17 @@ fn verify_processes_request_without_crash() {
 
     let output = Command::cargo_bin("yard-plugin-glue")
         .unwrap()
+        // Dummy credentials plus an unroutable endpoint keep this test
+        // fully offline. The runtime bridge now completes AWS I/O, so
+        // without these the spawned binary would reach whatever account
+        // the developer's ambient credentials resolve to. Port 1 has no
+        // listener, so the connection is refused immediately.
         .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .env("AWS_ENDPOINT_URL", "http://127.0.0.1:1")
+        .env("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+        .env("AWS_CONFIG_FILE", "/dev/null")
         .timeout(std::time::Duration::from_secs(30))
         .write_stdin(format!("{}\n", request))
         .output()
