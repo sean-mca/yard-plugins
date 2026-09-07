@@ -611,3 +611,138 @@ async fn destroy_succeeds_when_s3_cleanup_fails() {
         "expected an entity-not-found service error; got {error:?}"
     );
 }
+
+#[tokio::test]
+async fn verify_reports_false_for_missing_glue_job() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    // Arrange: a real deploy provides the s3_object half of the mixed request;
+    // the glue_job half names a job that was never created.
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("verify-mixed");
+    let bucket = common::unique_name("verify-mixed-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let script_key = format!("scripts/{job}.py");
+    fixture.track_key(&script_key);
+
+    let deploy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('verify me')"
+        }),
+    );
+    assert_eq!(deploy.exit_code, 0, "deploy failed; stderr: {}", deploy.stderr);
+
+    // Taken from the deploy response rather than rebuilt by hand: that is what
+    // proves deploy and verify agree on resource identity.
+    let script_resource = deploy.response["resources"][0].clone();
+    let missing_job = common::unique_name("never-created-job");
+    let missing_resource = json!({
+        "type": "glue_job",
+        "id": missing_job,
+        "provider": "glue"
+    });
+
+    // Act: one mixed request, real resource first.
+    let verify = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "verify",
+            "job_name": job,
+            "resources": [script_resource.clone(), missing_resource.clone()]
+        }),
+    );
+
+    // Assert
+    assert_eq!(verify.exit_code, 0, "verify failed; stderr: {}", verify.stderr);
+    let statuses = verify.response["statuses"]
+        .as_array()
+        .expect("verify response should carry a statuses array");
+    assert_eq!(statuses.len(), 2, "expected two statuses; got {statuses:?}");
+
+    assert_eq!(
+        statuses[0]["exists"], true,
+        "the deployed script should be reported present"
+    );
+    assert_eq!(
+        statuses[1]["exists"], false,
+        "a job that was never created should be reported absent"
+    );
+
+    // Each status echoes the original resource, in request order.
+    assert_eq!(statuses[0]["resource"]["type"], script_resource["type"]);
+    assert_eq!(statuses[0]["resource"]["id"], script_resource["id"]);
+    assert_eq!(statuses[0]["resource"]["provider"], script_resource["provider"]);
+    assert_eq!(statuses[1]["resource"]["type"], "glue_job");
+    assert_eq!(statuses[1]["resource"]["id"], missing_job);
+    assert_eq!(statuses[1]["resource"]["provider"], "glue");
+}
+
+#[tokio::test]
+async fn verify_reports_true_after_successful_deploy() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    // Arrange
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("verify-true");
+    let bucket = common::unique_name("verify-true-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let script_key = format!("scripts/{job}.py");
+    fixture.track_key(&script_key);
+
+    let deploy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('all resources present')"
+        }),
+    );
+    assert_eq!(deploy.exit_code, 0, "deploy failed; stderr: {}", deploy.stderr);
+    let deployed_resources = deploy.response["resources"].clone();
+
+    // Act: verify exactly the resources the deploy reported.
+    let verify = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "verify",
+            "job_name": job,
+            "resources": deployed_resources
+        }),
+    );
+
+    // Assert
+    assert_eq!(verify.exit_code, 0, "verify failed; stderr: {}", verify.stderr);
+    let statuses = verify.response["statuses"]
+        .as_array()
+        .expect("verify response should carry a statuses array");
+    assert_eq!(statuses.len(), 2, "expected two statuses; got {statuses:?}");
+    for status in statuses {
+        assert_eq!(
+            status["exists"], true,
+            "every resource a successful deploy returned should exist: {status}"
+        );
+    }
+}
