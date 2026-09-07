@@ -366,3 +366,160 @@ async fn deploy_with_empty_prefix_writes_to_bucket_root() {
         "verify should report the uploaded script as present"
     );
 }
+
+// This test proves idempotent destroy end to end (INTG-01, D-11). It does
+// NOT cover the `EntityNotFoundException` arm in `delete_glue_job`: ministack
+// and real AWS both return success for `DeleteJob` against a job that does
+// not exist, so the SDK never produces the error that arm classifies, and
+// this test passes identically whether or not the arm is present. D-10's
+// verification is code review plus `cargo clippy -D warnings`, recorded in
+// 08-VALIDATION.md under Manual-Only Verifications. Do not read this test as
+// coverage for it.
+#[tokio::test]
+async fn destroying_an_already_deleted_job_succeeds() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    // Arrange: the precondition is a real deploy, per D-08 -- the plugin's own
+    // operation creates the state the destroy then removes.
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("destroy-twice");
+    let bucket = common::unique_name("destroy-twice-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let script_key = format!("scripts/{job}.py");
+    fixture.track_key(&script_key);
+
+    let deploy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('to be destroyed')"
+        }),
+    );
+    assert_eq!(deploy.exit_code, 0, "deploy failed; stderr: {}", deploy.stderr);
+    let deployed_resources = deploy.response["resources"].clone();
+
+    // Act: the same destroy request, twice. destroy resolves its region from
+    // the environment, which run_plugin sets, so it carries no glue config.
+    let destroy_request = json!({
+        "operation": "destroy",
+        "job_name": job,
+        "resources": deployed_resources
+    });
+    let first = common::run_plugin(&endpoint, &destroy_request);
+    let second = common::run_plugin(&endpoint, &destroy_request);
+
+    // Assert
+    assert_eq!(first.exit_code, 0, "first destroy failed; stderr: {}", first.stderr);
+    assert!(
+        first.response.is_object(),
+        "first destroy should answer with a JSON object; got {}",
+        first.response
+    );
+    assert_eq!(
+        second.exit_code, 0,
+        "second destroy failed; stderr: {}",
+        second.stderr
+    );
+    assert!(
+        second.response.is_object(),
+        "second destroy should answer with a JSON object; got {}",
+        second.response
+    );
+
+    // Existence is probed with GetJob only: ministack light does not implement
+    // the Glue job-listing action, and a sweep could observe state this test
+    // does not own.
+    let error = clients
+        .glue
+        .get_job()
+        .job_name(&job)
+        .send()
+        .await
+        .expect_err("the job should be absent after destroy");
+    assert!(
+        error
+            .as_service_error()
+            .is_some_and(|se| se.is_entity_not_found_exception()),
+        "expected an entity-not-found service error; got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_with_no_resources_succeeds() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    // Arrange
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("destroy-empty");
+    let bucket = common::unique_name("destroy-empty-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let script_key = format!("scripts/{job}.py");
+    fixture.track_key(&script_key);
+
+    let deploy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('survives an empty destroy')"
+        }),
+    );
+    assert_eq!(deploy.exit_code, 0, "deploy failed; stderr: {}", deploy.stderr);
+
+    // Act
+    let destroy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "destroy",
+            "job_name": job,
+            "resources": []
+        }),
+    );
+
+    // Assert: exit 0 with a JSON object, and nothing mutated -- proven by
+    // reading the stored state back rather than by trusting the response.
+    assert_eq!(destroy.exit_code, 0, "destroy failed; stderr: {}", destroy.stderr);
+    assert!(
+        destroy.response.is_object(),
+        "destroy should answer with a JSON object; got {}",
+        destroy.response
+    );
+
+    clients
+        .glue
+        .get_job()
+        .job_name(&job)
+        .send()
+        .await
+        .expect("the deployed job should survive a destroy with no resources");
+
+    clients
+        .s3
+        .head_object()
+        .bucket(&bucket)
+        .key(&script_key)
+        .send()
+        .await
+        .expect("the deployed script should survive a destroy with no resources");
+}
