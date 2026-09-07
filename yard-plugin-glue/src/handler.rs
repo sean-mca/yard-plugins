@@ -7,6 +7,7 @@
 //! types).
 
 use anyhow::{Context, Result};
+use aws_sdk_glue::error::ProvideErrorMetadata;
 use yard_plugin_common::aws::{aws_config, S3Client, S3ScriptOps};
 use yard_plugin_common::codegen::generate_pyspark;
 use yard_plugin_sdk::{
@@ -179,14 +180,38 @@ async fn create_or_update_glue_job(
 }
 
 /// Delete a Glue job by name.
+///
+/// Deletion is idempotent: when Glue reports the job absent the call
+/// succeeds, mirroring the not-found classification already used by
+/// [`glue_job_exists`]. Any other failure is returned with its context
+/// chain intact.
+///
+/// Unlike `GetJob`, the `DeleteJob` API models only
+/// `InternalServiceException`, `InvalidInputException` and
+/// `OperationTimeoutException`, so there is no
+/// `is_entity_not_found_exception()` accessor to call here. A
+/// not-found response would therefore arrive as `Unhandled` and is
+/// classified by its wire error code instead -- the forwards-compatible
+/// form the SDK itself recommends for undeclared error shapes.
+///
+/// No automated coverage: the not-found branch is not exercised by any
+/// test in this phase. ministack 1.4.8 and real AWS both return success
+/// for `DeleteJob` against a job that does not exist, so the SDK never
+/// produces the error this branch classifies. The INTG-01 lifecycle
+/// test proves idempotent destroy end-to-end but does not enter this
+/// path. Verification here is code review plus clippy, not a test.
 async fn delete_glue_job(client: &aws_sdk_glue::Client, job_name: &str) -> Result<()> {
-    client
-        .delete_job()
-        .job_name(job_name)
-        .send()
-        .await
-        .with_context(|| format!("Failed to delete Glue job \"{job_name}\""))?;
-    Ok(())
+    match client.delete_job().job_name(job_name).send().await {
+        Ok(_) => Ok(()),
+        Err(e)
+            if e.as_service_error()
+                .is_some_and(|se| se.code() == Some("EntityNotFoundException")) =>
+        {
+            tracing::info!("Glue job \"{job_name}\" already absent; delete is a no-op");
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("Failed to delete Glue job \"{job_name}\"")),
+    }
 }
 
 /// Check whether a Glue job exists by name.
