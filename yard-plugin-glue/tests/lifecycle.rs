@@ -523,3 +523,91 @@ async fn destroy_with_no_resources_succeeds() {
         .await
         .expect("the deployed script should survive a destroy with no resources");
 }
+
+#[tokio::test]
+async fn destroy_succeeds_when_s3_cleanup_fails() {
+    let Some(endpoint) = common::ministack_endpoint() else {
+        return;
+    };
+
+    // Arrange: a real deployed job, plus a bucket name that is never created.
+    // Deriving the bogus name from unique_name guarantees it is absent and
+    // cannot collide with a bucket another test in this process owns.
+    let clients = common::clients(&endpoint).await;
+    let job = common::unique_name("s3-fail");
+    let bucket = common::unique_name("s3-fail-bkt");
+    let fixture = common::BucketFixture::create(&clients.s3, &bucket).await;
+    let script_key = format!("scripts/{job}.py");
+    fixture.track_key(&script_key);
+
+    let deploy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "deploy",
+            "job_name": job,
+            "job_config": {
+                "role": TEST_ROLE,
+                "glue": {
+                    "region": "us-east-1",
+                    "script_bucket": bucket,
+                    "script_prefix": "scripts/"
+                }
+            },
+            "artifact": "print('s3 cleanup will fail')"
+        }),
+    );
+    assert_eq!(deploy.exit_code, 0, "deploy failed; stderr: {}", deploy.stderr);
+
+    let missing_bucket = common::unique_name("never-created-bkt");
+
+    // Act: the real job first, then an s3_object in a bucket that does not
+    // exist. DeleteObject raises a no-such-bucket service error, which is what
+    // drives the handler's non-fatal branch -- and the ordering mirrors the
+    // handler's own two passes, fatal Glue deletes before S3 cleanup.
+    let destroy = common::run_plugin(
+        &endpoint,
+        &json!({
+            "operation": "destroy",
+            "job_name": job,
+            "resources": [
+                {"type": "glue_job", "id": job, "provider": "glue"},
+                {
+                    "type": "s3_object",
+                    "id": format!("s3://{missing_bucket}/{script_key}"),
+                    "provider": "glue"
+                }
+            ]
+        }),
+    );
+
+    // Assert: the S3 failure is reported but does not fail the operation.
+    assert_eq!(destroy.exit_code, 0, "destroy failed; stderr: {}", destroy.stderr);
+    assert!(
+        destroy.response.is_object(),
+        "destroy should answer with a JSON object; got {}",
+        destroy.response
+    );
+
+    // Only the prefix is matched: the full line interpolates the resource id
+    // and the SDK's own error rendering, neither of which is a stable contract.
+    assert!(
+        destroy.stderr.contains("Non-fatal"),
+        "expected a non-fatal S3 cleanup warning on stderr; got: {}",
+        destroy.stderr
+    );
+
+    // The fatal Glue delete still ran to completion before the S3 step failed.
+    let error = clients
+        .glue
+        .get_job()
+        .job_name(&job)
+        .send()
+        .await
+        .expect_err("the job should be absent after destroy");
+    assert!(
+        error
+            .as_service_error()
+            .is_some_and(|se| se.is_entity_not_found_exception()),
+        "expected an entity-not-found service error; got {error:?}"
+    );
+}
