@@ -1,15 +1,18 @@
 # yard-plugins
 
-Glue and EMR provider plugins for the [yard](https://github.com/sean-mca/yard) CLI. Each plugin is a standalone binary that implements the `PluginHandler` trait from `yard-plugin-sdk` and communicates with the yard host over JSON-over-stdio.
+Glue and Airflow provider plugins for the [yard](https://github.com/sean-mca/yard) CLI. Each plugin is a standalone binary that implements the `PluginHandler` trait from `yard-plugin-sdk` and communicates with the yard host over JSON-over-stdio.
 
 ## Architecture
 
-Rust workspace with two binary crates:
+Rust workspace with one binary crate and one shared library, plus a standalone Python plugin:
 
 - **yard-plugin-glue** — AWS Glue provider: PySpark codegen, Glue job deploy/destroy/verify via aws-sdk-glue
-- **yard-plugin-emr** — AWS EMR provider: PySpark codegen, EMR step deploy/destroy/verify via aws-sdk-emr
+- **yard-plugin-common** — shared PySpark codegen pipeline and AWS helpers
+- **yard-plugin-airflow** — Airflow DAG provider, single-file Python, implements the same protocol without the Rust SDK
 
-Both crates depend on `yard-plugin-sdk` (from the yard repo) which provides:
+EMR is out of scope: the provider was removed and will not be built.
+
+The Glue crate depends on `yard-plugin-sdk` (from the yard repo) which provides:
 - `PluginHandler` trait — 8 required methods: `name`, `version`, `validate`, `codegen`, `deploy`, `destroy`, `verify`, `schema`
 - `PluginServer::run()` — stdio protocol server (handshake, request dispatch, response serialization)
 - Re-exports of all protocol types (`CodegenResponse`, `DeployResponse`, etc.)
@@ -44,13 +47,11 @@ This is a structural consequence of the spawn-per-operation plugin model. The re
 
 ## Reference Implementation
 
-The Glue and EMR provider logic previously lived in `yard-core` and was removed in yard v2.0 (Phase 70). The deleted code is the implementation reference:
+The Glue provider logic previously lived in `yard-core` and was removed in yard v2.0 (Phase 70). The deleted code is the implementation reference:
 
 - **Glue provider:** `yard/yard-core/src/providers/glue.rs` (before commit `1cfa880`)
-- **EMR provider:** `yard/yard-core/src/providers/emr.rs` (before commit `1cfa880`)
 - **Glue codegen:** `yard/yard-core/src/codegen/` (PySpark generation via Tera templates)
 - **Glue template:** `yard/yard-core/src/templates/glue.py.tera`
-- **EMR template:** `yard/yard-core/src/templates/emr.py.tera`
 
 To view this code: `cd ../yard && git show 1cfa880^:yard-core/src/providers/glue.rs`
 
@@ -90,14 +91,14 @@ Release binaries follow the pattern: `yard-plugin-{name}-{version}-{os}-{arch}`
 
 Examples:
 - `yard-plugin-glue-0.1.0-aarch64-apple-darwin`
-- `yard-plugin-emr-0.1.0-x86_64-unknown-linux-gnu`
+- `yard-plugin-glue-0.1.0-x86_64-unknown-linux-gnu`
 
 ## Dependencies
 
 - `yard-plugin-sdk` — the only yard dependency needed (re-exports protocol types + `anyhow` + `serde_json` + `tracing`)
-- `aws-sdk-glue` / `aws-sdk-emr` — AWS SDK clients for the respective services
+- `aws-sdk-glue` — AWS SDK client for Glue
 - `aws-config` — AWS credential/region resolution
-- `tera` — template engine for PySpark codegen (Glue plugin only)
+- `tera` — template engine for PySpark codegen
 - `tokio` — async runtime for AWS SDK calls
 
 ## Current Milestone

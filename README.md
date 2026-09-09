@@ -8,12 +8,11 @@ into the CLI, the way Terraform loads providers. Each plugin here is its own
 binary that speaks a small JSON-over-stdio protocol: the host spawns it, sends
 one request, reads one response, and the process exits.
 
-This repository holds three of them.
+This repository holds two of them.
 
 | Plugin | Language | Target | Status |
 |---|---|---|---|
 | `yard-plugin-glue` | Rust | AWS Glue ETL jobs | Implemented — validate, codegen, deploy, destroy, verify, schema |
-| `yard-plugin-emr` | Rust | AWS EMR steps | Scaffolded — protocol server and runtime bridge in place, handlers return empty responses |
 | `yard-plugin-airflow` | Python | Airflow DAG files on S3 | Implemented — validate, codegen, deploy, destroy, verify, schema |
 
 The Airflow plugin exists in Python on purpose: it demonstrates that the
@@ -51,11 +50,10 @@ Six operations make up the handler surface:
 ```
 yard-plugin-common/     shared Rust library: PySpark codegen + AWS helpers
   src/codegen/          source, transform, sink, and PII-masking codegen
-  src/templates/        Tera templates for the generated PySpark
+  src/templates/        Tera template for the generated PySpark
   src/aws/              config resolution and S3 script upload/delete
-  tests/                snapshot tests over 9 YAML job fixtures
+  tests/                snapshot tests over 8 YAML job fixtures
 yard-plugin-glue/       AWS Glue provider binary
-yard-plugin-emr/        AWS EMR provider binary (scaffold)
 yard-plugin-airflow/    Airflow DAG provider, single-file Python
 ```
 

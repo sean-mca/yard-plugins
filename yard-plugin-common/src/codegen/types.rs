@@ -13,7 +13,7 @@ use serde::Deserialize;
 /// `serde_json::Value` payload.
 #[derive(Debug, Deserialize)]
 pub struct JobConfig {
-    /// Job type string: "glue", "emr", etc.
+    /// Job type string: "glue", etc.
     #[serde(default)]
     pub job_type: Option<String>,
 

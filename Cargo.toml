@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "yard-plugin-glue",
-    "yard-plugin-emr",
     "yard-plugin-common",
 ]
 resolver = "2"

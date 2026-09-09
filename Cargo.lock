@@ -2355,19 +2355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "yard-plugin-emr"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "predicates",
- "serde",
- "serde_json",
- "tokio",
- "yard-plugin-sdk",
-]
-
-[[package]]
 name = "yard-plugin-glue"
 version = "0.1.0"
 dependencies = [

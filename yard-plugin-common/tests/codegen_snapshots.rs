@@ -44,11 +44,6 @@ fn codegen_body_override() {
 }
 
 #[test]
-fn codegen_emr_simple() {
-    assert_snapshot!(codegen(include_str!("fixtures/emr_simple.yaml")));
-}
-
-#[test]
 fn codegen_kafka_source() {
     assert_snapshot!(codegen(include_str!("fixtures/kafka_source.yaml")));
 }

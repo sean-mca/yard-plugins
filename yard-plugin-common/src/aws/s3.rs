@@ -1,7 +1,7 @@
 //! S3 script operations for plugin deploy/destroy lifecycle.
 //!
 //! [`S3ScriptOps`] encapsulates the upload, delete, and existence-check
-//! operations that both Glue and EMR plugins perform on generated PySpark
+//! operations that the Glue plugin performs on generated PySpark
 //! scripts stored in S3.
 
 use anyhow::{Context, Result};

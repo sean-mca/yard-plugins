@@ -1,7 +1,7 @@
 //! PySpark/Glue script codegen from yard job definitions.
 //!
-//! This module generates complete Python scripts for AWS Glue and EMR
-//! jobs by combining Tera templates with dynamic source, transform,
+//! This module generates complete Python scripts for AWS Glue jobs
+//! by combining Tera templates with dynamic source, transform,
 //! and sink rendering. The generated scripts include import management,
 //! Spark session setup, null-handling helpers for Iceberg sinks, and
 //! proper Glue `job.commit()` teardown.
@@ -33,9 +33,6 @@ use transform::render_transforms;
 
 /// Tera template for AWS Glue PySpark jobs.
 const GLUE_TEMPLATE: &str = include_str!("../templates/glue.py.tera");
-
-/// Tera template for EMR PySpark jobs.
-const EMR_TEMPLATE: &str = include_str!("../templates/emr.py.tera");
 
 /// Emitted inline at module scope when an iceberg sink is writing with
 /// `fill_nulls` enabled. Provides a single schema-conform path (Spark 3.5 /
@@ -194,7 +191,7 @@ def _yard_conform(df, target_schema):
 
 /// Generate a complete PySpark script for the given job definition.
 ///
-/// For Glue and EMR job types, renders sources, transforms, sink, and
+/// For the Glue job type, renders sources, transforms, sink, and
 /// import management into a Tera template. If `job_file` is set, returns
 /// the external file contents verbatim.
 ///
@@ -218,7 +215,6 @@ pub fn generate_pyspark(job_name: &str, job_config: &serde_json::Value) -> Resul
     let job_type = config.job_type.as_deref().unwrap_or("glue");
     let template = match job_type {
         "glue" => GLUE_TEMPLATE,
-        "emr" => EMR_TEMPLATE,
         other => return Err(anyhow!("unsupported job type for codegen: {other}")),
     };
 
