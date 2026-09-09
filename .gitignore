@@ -2,3 +2,7 @@
 __pycache__/
 .DS_Store
 .claude/worktrees/
+
+# Local-only planning and agent context — not published
+.planning/
+.claude/
